@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yapper"
+version = "0.1.0"
+description = "A conversation-based alignment layer between humans and AI coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "anthropic>=0.39.0",
+]
+
+[project.scripts]
+yap = "agent:main"
+
+[tool.setuptools]
+py-modules = ["agent"]
