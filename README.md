@@ -1,184 +1,95 @@
-# ADL Agent
+# Yapper
 
-A simple agentic coding tool that uses **Agent Description Language (ADL)** to maintain shared understanding between humans and AI coding agents.
+A conversation-based alignment layer between humans and AI coding agents. Yapper turns messy human intent ("yapping") into specific, trackable specs through dialogue.
 
-## What is ADL?
+## The Problem
 
-ADL is a markdown-based documentation format where:
+When coding with AI agents:
+- Codebases get messy fast
+- Agents lack context and reinvent wheels
+- Humans lose control of their own code
+- No way to track who decided what
 
-- **Humans can "yap"** - write messy notes, half-thoughts, TODOs
-- **Agents structure it** - but only after asking permission
-- **Initiative is tracked** - clear who decided what (`[H]` human, `[A]` agent)
-- **Files are scattered** - each `ADL.md` lives alongside the code it describes
-- **Gaps are obvious** - missing docs are structurally evident
+## The Solution
 
-See `ADL-SPEC.md` for the full specification.
+Yapper creates a conversation artifact - not documentation, but a record of how human intent becomes code:
+
+1. **Human yaps** vague thoughts in the "Yap Here" section
+2. **Agent asks** clarifying questions
+3. **Together they refine** into specific specs
+4. **Agent implements** only after approval
+5. **Everything is tracked** with `decided:` attribution
 
 ## Quick Start
 
-### 1. Install dependencies
-
 ```bash
-pip install -r requirements.txt
-```
+pip install anthropic
+export ANTHROPIC_API_KEY=your-key
 
-### 2. Set your API key
+# Interactive mode
+python agent.py -i --project ./your-project
 
-```bash
-export ANTHROPIC_API_KEY=your-key-here
-```
+# Single request
+python agent.py "add user login" --project ./your-project
 
-### 3. Run the agent
-
-Single request:
-```bash
-python agent.py "Add input validation to the login endpoint" --project ./my-project
-```
-
-Interactive mode:
-```bash
-python agent.py --interactive --project ./my-project
+# Initialize Yapper for a new project
+python agent.py --init --project ./your-project
 ```
 
 ## How It Works
 
-1. **Agent reads ADL first** - Before touching code, the agent reads relevant `ADL.md` files to understand context, conventions, and constraints.
-
-2. **Agent respects decisions** - Documented `[H]` decisions are human choices the agent won't override. `[A]` decisions are agent choices that can be discussed.
-
-3. **Agent asks before formalizing** - When extracting decisions from human notes, the agent asks for confirmation on wording before moving to structured sections.
-
-4. **Agent logs its own decisions** - Implementation choices the agent makes are marked with `[A]` for transparency.
-
-5. **Agent updates ADL** - After making code changes, the agent updates the relevant `ADL.md` files with proper initiative markers.
-
-## Initiative Tracking
-
-Every decision is marked with who made it:
-
-| Marker | Meaning |
-|--------|---------|
-| `[H]` | Human initiative - human decided this |
-| `[A]` | Agent initiative - agent decided this |
-| `[?]` | Unclear - needs confirmation |
-
-Example:
-```markdown
-## Decisions
-
-> [H] :decision: use canvas not dom
-> human wanted smooth graphics
-
-> [A] :decision: 150ms tick rate
-> agent chose reasonable default
-```
-
-## The Confirmation Workflow
-
-When agent extracts from human notes:
-
-1. Human yaps in Notes section
-2. Agent identifies potential decisions
-3. Agent asks: "ok to word these as [H] ...?"
-4. Human confirms or edits
-5. Agent formalizes with `[H]` marker
-
-Agent's own decisions go directly with `[A]`, no confirmation needed.
-
-## Project Structure
-
-```
-adl-agent/
-├── ADL-SPEC.md              # The ADL language specification
-├── AGENT-SYSTEM-PROMPT.md   # System prompt for the coding agent
-├── agent.py                 # The Python agent implementation
-├── requirements.txt         # Dependencies
-├── README.md                # This file
-└── sample-project/          # Example project with ADL files
-    ├── ADL.md
-    └── src/
-        └── auth/
-            ├── ADL.md
-            └── password.py
-```
-
-## ADL File Structure
-
-Minimal valid ADL:
+Every spec has context:
 
 ```markdown
-# Module Name
-
-One sentence describing what this does.
+- movement queue (max 3 inputs)
+  > intent: no lost keypresses when pressing quickly
+  > why: buffers rapid inputs, executes one per frame
+  > decided: agent, human approved
 ```
 
-Full structure:
+The `decided:` field tracks attribution:
+- `human` - human specified this
+- `agent, human approved` - agent proposed, human agreed
+- `conversation` - emerged from back-and-forth
+- `agent (default)` - technical default
+- `unknown` - legacy code
 
-```markdown
-# Module Name
+## Features
 
-Description paragraph.
+- **Change detection** - Shows which ADL files have pending changes on startup
+- **Hash tracking** - Each ADL file has a hash to detect modifications
+- **Rate limit handling** - Pauses and retries instead of crashing
+- **Colored diffs** - Git-style +/- for all changes
+- **Guided init** - Conversational setup for new projects
 
-## Notes
+## File Structure
 
-<!-- Human scratchpad - agent reads, doesn't modify -->
-- random thoughts
-- TODOs
-- half-baked ideas
-
-## What's Here
-
-### `file.py`
-What this file does.
-
-- `function_name()` → what it returns
-
-> :warn: Gotchas and warnings
-> :contract: Preconditions and assumptions
-> :decision: Design choices with rationale
-
-## Depends On
-
-- `other-module/` - why we need it
-
-## Used By
-
-- `consumer/` - what uses this
-
-## Gaps
-
-- Known missing documentation
+```
+your-project/
+├── ADL.md              # Root: project overview
+├── src/
+│   ├── ADL.md          # src-level specs
+│   └── auth/
+│       └── ADL.md      # Auth module specs
 ```
 
-## Convention Markers
+## Commands
 
-| Marker | Meaning |
-|--------|---------|
-| `:warn:` | gotcha or danger |
-| `:contract:` | precondition or assumption |
-| `:todo:` | known incomplete item |
-| `:decision:` | design choice with rationale |
-| `:deprecated:` | don't use, with alternative |
-| `:extends:` | extension point |
+In interactive mode:
+- `quit` - exit
+- `clear` - reset conversation
+- `changes` - show pending ADL changes
+- `mark <path>` - mark ADL as implemented
 
-## Agent Behavior
+## The Name
 
-The agent follows these rules:
+"Yapper" - because humans yap their messy thoughts and the agent makes sense of them. The "Yap Here" section is where stream-of-consciousness goes, and the agent structures it into specs.
 
-1. **Always read ADL before code** - Uses `read_adl_chain` tool first
-2. **Respect `[H]` decisions** - Won't override human choices
-3. **Ask before formalizing** - Confirms wording before extracting from notes
-4. **Log own decisions as `[A]`** - Transparent about what agent chose
-5. **Keep it informal** - Matches human's tone, no marketing speak
-6. **Use `[?]` when unsure** - Never guesses about initiative
+## Documentation
 
-## Extending
-
-The agent is designed to be extended. Key files:
-
-- `AGENT-SYSTEM-PROMPT.md` - Modify agent behavior and rules
-- `ADL-SPEC.md` - Extend the ADL format
-- `agent.py` - Add new tools or change the agentic loop
+- `ADL.md` - This project's own spec (meta!)
+- `ADL-SPEC.md` - The Yapper format specification
+- `AGENT-SYSTEM-PROMPT.md` - Agent behavioral instructions
 
 ## License
 

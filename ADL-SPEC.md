@@ -114,7 +114,7 @@ Every ADL.md SHOULD have a "Notes" or "Human Notes" section at the top (after th
 
 Handles user authentication and sessions.
 
-## Notes
+## Yap Here
 
 <!-- 
 Human-writable scratchpad. Agent should read this for context but 
@@ -395,7 +395,7 @@ The Notes section is where intent gets refined:
 ### Step 1: Human yaps
 
 ```markdown
-## Notes
+## Yap Here
 
 - want the snake to feel snappy
 - current movement feels weird
@@ -405,7 +405,7 @@ The Notes section is where intent gets refined:
 ### Step 2: Agent asks clarifying questions
 
 ```markdown
-## Notes
+## Yap Here
 
 - want the snake to feel snappy
 - current movement feels weird  
@@ -428,7 +428,7 @@ The Notes section is where intent gets refined:
 ### Step 3: Human clarifies
 
 ```markdown
-## Notes
+## Yap Here
 
 - want the snake to feel snappy
 - current movement feels weird
@@ -532,9 +532,9 @@ The root `ADL.md` has additional responsibilities:
 
 One paragraph describing the project's purpose.
 
-## Notes
+## Yap Here
 
-<!-- Human scratchpad for project-level thoughts -->
+<!-- Yap yap, write down your thoughts here and the agent will take care of it.. for project-level thoughts -->
 
 ## Quick Map
 
@@ -655,7 +655,7 @@ Date formatting and parsing.
 
 Common utility functions used across the project. These are pure functions with no side effects or external dependencies.
 
-## Notes
+## Yap Here
 
 - might want to add a `money.ts` for currency formatting
 - the date parsing is locale-dependent, need to document that
