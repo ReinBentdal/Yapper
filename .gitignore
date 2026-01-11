@@ -1,5 +1,6 @@
 .env
 .*
 !.gitignore
+!.yapignore
 *.egg-info/
 __pycache__
