@@ -3,7 +3,7 @@
 Yapper - A conversation-based agentic coding tool.
 
 Features:
-- YAP.md change detection on startup
+- .yap file change detection on startup
 - Hash-based tracking of implementation status
 - Colored output with git-style diffs
 - Guided YAP initialization for new repos
@@ -80,6 +80,7 @@ class Colors:
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
     WHITE = "\033[37m"
+    ORANGE = "\033[38;5;208m"
     
     BG_RED = "\033[41m"
     BG_GREEN = "\033[42m"
@@ -170,11 +171,12 @@ def get_diff_summary(old_content: str, new_content: str) -> tuple[int, int, int,
 
 @dataclass
 class AgentConfig:
-    model: str = "claude-opus-4-20250514"
+    model: str = "claude-opus-4-5-20251101"
     max_tokens: int = 8192
     max_read_lines: int = 100
     project_root: str = "."
-    yap_filename: str = "YAP.md"
+    yap_extension: str = ".yap"
+    project_yap: str = "project.yap"
 
 
 # =============================================================================
@@ -182,39 +184,72 @@ class AgentConfig:
 # =============================================================================
 
 class YapTracker:
-    """Tracks YAP.md file changes via hash at end of file."""
+    """Tracks .yap file changes and code drift via hashes at end of file."""
 
+    # New format: <!-- code: xxx | yap: yyy | 2024-01-15 14:30 -->
     HASH_PATTERN = re.compile(
-        r'\n---\n<!-- YAP-HASH: ([a-f0-9]+) \| implemented: (.+?) -->\s*$'
+        r'\n<!-- code: ([a-f0-9]+|none) \| yap: ([a-f0-9]+) \| (.+?) -->\s*$'
     )
 
     @staticmethod
     def compute_hash(content: str) -> str:
+        """Compute hash of content, excluding the hash footer."""
         content = YapTracker.HASH_PATTERN.sub('', content)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     @staticmethod
-    def get_hash_info(content: str) -> tuple[Optional[str], Optional[str]]:
+    def compute_code_hash(code_path: Path) -> str:
+        """Compute hash of associated code file(s)."""
+        if not code_path.exists():
+            return "none"
+        if code_path.is_file():
+            return hashlib.sha256(code_path.read_bytes()).hexdigest()[:16]
+        elif code_path.is_dir():
+            # Hash all code files in directory
+            code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.java', '.cpp', '.c', '.h'}
+            hasher = hashlib.sha256()
+            for f in sorted(code_path.rglob('*')):
+                if f.is_file() and f.suffix in code_extensions:
+                    hasher.update(f.read_bytes())
+            return hasher.hexdigest()[:16] if hasher.digest_size else "none"
+        return "none"
+
+    @staticmethod
+    def get_hash_info(content: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Returns (code_hash, yap_hash, timestamp) or (None, None, None)."""
         match = YapTracker.HASH_PATTERN.search(content)
         if match:
-            return match.group(1), match.group(2)
-        return None, None
+            return match.group(1), match.group(2), match.group(3)
+        return None, None, None
 
     @staticmethod
-    def add_hash(content: str) -> str:
+    def add_hash(content: str, code_hash: str = "none") -> str:
+        """Add or update hash footer with both code and yap hashes."""
         content = YapTracker.HASH_PATTERN.sub('', content)
         content = content.rstrip() + '\n'
-        file_hash = YapTracker.compute_hash(content)
+        yap_hash = YapTracker.compute_hash(content)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        return f"{content}\n---\n<!-- YAP-HASH: {file_hash} | implemented: {timestamp} -->\n"
+        return f"{content}\n<!-- code: {code_hash} | yap: {yap_hash} | {timestamp} -->\n"
 
     @staticmethod
-    def has_changes(content: str) -> bool:
-        stored_hash, _ = YapTracker.get_hash_info(content)
-        if stored_hash is None:
-            return True
-        current_hash = YapTracker.compute_hash(content)
-        return current_hash != stored_hash
+    def check_status(content: str, code_path: Optional[Path] = None) -> dict:
+        """
+        Check yap/code sync status.
+        Returns dict with: yap_changed, code_changed, code_hash, yap_hash, timestamp
+        """
+        stored_code, stored_yap, timestamp = YapTracker.get_hash_info(content)
+        current_yap = YapTracker.compute_hash(content)
+        current_code = YapTracker.compute_code_hash(code_path) if code_path else "none"
+
+        return {
+            "yap_changed": stored_yap is None or stored_yap != current_yap,
+            "code_changed": stored_code is not None and stored_code != "none" and stored_code != current_code,
+            "stored_code_hash": stored_code,
+            "stored_yap_hash": stored_yap,
+            "current_code_hash": current_code,
+            "current_yap_hash": current_yap,
+            "timestamp": timestamp
+        }
 
 
 # =============================================================================
@@ -222,41 +257,70 @@ class YapTracker:
 # =============================================================================
 
 class YapManager:
-    def __init__(self, project_root: str, yap_filename: str = "YAP.md"):
+    def __init__(self, project_root: str, yap_extension: str = ".yap", project_yap: str = "project.yap"):
         self.project_root = Path(project_root).resolve()
-        self.yap_filename = yap_filename
+        self.yap_extension = yap_extension
+        self.project_yap = project_yap
         self.tracker = YapTracker()
-    
+
     def find_all_yap_files(self) -> list[Path]:
+        """Find all .yap files in project."""
         yap_files = []
-        for path in self.project_root.rglob(self.yap_filename):
+        for path in self.project_root.rglob(f"*{self.yap_extension}"):
             yap_files.append(path)
-        return sorted(yap_files, key=lambda p: len(p.parts))
+        return sorted(yap_files, key=lambda p: (len(p.parts), p.name))
+
+    def get_code_path_for_yap(self, yap_path: Path) -> Optional[Path]:
+        """Get the code file/directory associated with a .yap file."""
+        if yap_path.name == self.project_yap:
+            return self.project_root  # project.yap covers the whole project
+
+        # foo.yap -> foo.py or foo/ directory
+        base_name = yap_path.stem  # removes .yap
+        parent = yap_path.parent
+
+        # Check for code file with same name
+        for ext in ['.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.java', '.cpp', '.c']:
+            code_file = parent / f"{base_name}{ext}"
+            if code_file.exists():
+                return code_file
+
+        # Check for directory with same name
+        code_dir = parent / base_name
+        if code_dir.is_dir():
+            return code_dir
+
+        return None
 
     def get_yap_for_path(self, target_path: str) -> list[Path]:
+        """Get relevant .yap files for a given code path."""
         target = Path(target_path)
         if not target.is_absolute():
             target = self.project_root / target
         target = target.resolve()
 
-        current = target if target.is_dir() else target.parent
-        paths_to_check = []
-
-        while True:
-            paths_to_check.append(current)
-            if current == self.project_root or current == current.parent:
-                break
-            try:
-                current.relative_to(self.project_root)
-            except ValueError:
-                break
-            current = current.parent
-
         yap_chain = []
-        for path in reversed(paths_to_check):
-            yap_file = path / self.yap_filename
-            if yap_file.exists():
-                yap_chain.append(yap_file)
+
+        # Always include project.yap if it exists
+        project_yap_path = self.project_root / self.project_yap
+        if project_yap_path.exists():
+            yap_chain.append(project_yap_path)
+
+        # Look for specific .yap file for this code
+        if target.is_file():
+            # foo.py -> foo.yap
+            specific_yap = target.parent / f"{target.stem}{self.yap_extension}"
+            if specific_yap.exists():
+                yap_chain.append(specific_yap)
+        elif target.is_dir():
+            # foo/ -> foo.yap (in parent) or foo/project.yap
+            specific_yap = target.parent / f"{target.name}{self.yap_extension}"
+            if specific_yap.exists():
+                yap_chain.append(specific_yap)
+            # Also check for .yap files inside the directory
+            for yap_file in sorted(target.glob(f"*{self.yap_extension}")):
+                if yap_file not in yap_chain:
+                    yap_chain.append(yap_file)
 
         return yap_chain
 
@@ -267,8 +331,11 @@ class YapManager:
         yap_path.write_text(content)
 
     def mark_implemented(self, yap_path: Path):
+        """Mark yap as implemented, computing both yap and code hashes."""
         content = self.read_yap(yap_path)
-        updated = self.tracker.add_hash(content)
+        code_path = self.get_code_path_for_yap(yap_path)
+        code_hash = self.tracker.compute_code_hash(code_path) if code_path else "none"
+        updated = self.tracker.add_hash(content, code_hash)
         self.write_yap(yap_path, updated)
 
     def read_yap_section(self, yap_path: Path, section_name: str) -> tuple[str, bool]:
@@ -418,20 +485,160 @@ class YapManager:
 
         return '\n'.join(new_lines), had_human_notes
 
-    def get_changed_yap_files(self) -> list[tuple[Path, str, str, str]]:
-        changed = []
+    def get_pending_tasks(self, yap_path: Path) -> list[str]:
+        """Extract pending tasks from Yap Here section."""
+        content = self.read_yap(yap_path)
+        tasks = []
+
+        # Look for pending items in various formats:
+        # <!-- Pending implementation: - [ ] Task1 -->
+        # <!-- Pending: - item1 - item2 -->
+        import re
+        pending_pattern = re.compile(r'<!--\s*Pending[^:]*:(.*?)-->', re.DOTALL | re.IGNORECASE)
+        matches = pending_pattern.findall(content)
+
+        for match in matches:
+            # Extract individual items (- [ ] item or - item)
+            items = re.findall(r'-\s*(?:\[\s*\])?\s*(.+?)(?=\n-|\n*$)', match, re.DOTALL)
+            tasks.extend([item.strip() for item in items if item.strip()])
+
+        return tasks
+
+    def add_pending_task(self, yap_path: Path, task: str) -> str:
+        """Add a pending task to Yap Here section."""
+        content = self.read_yap(yap_path)
+
+        # Check if there's already a pending block
+        import re
+        pending_pattern = re.compile(r'(<!--\s*Pending[^:]*:)(.*?)(-->)', re.DOTALL | re.IGNORECASE)
+        match = pending_pattern.search(content)
+
+        if match:
+            # Add to existing pending block
+            prefix, existing, suffix = match.groups()
+            new_item = f"\n- [ ] {task}"
+            new_block = f"{prefix}{existing.rstrip()}{new_item}\n{suffix}"
+            new_content = content[:match.start()] + new_block + content[match.end():]
+        else:
+            # Create new pending block in Yap Here
+            yap_here_pattern = re.compile(r'(## Yap Here\n)', re.IGNORECASE)
+            yap_match = yap_here_pattern.search(content)
+
+            if yap_match:
+                pending_block = f"\n<!-- Pending implementation:\n- [ ] {task}\n-->\n"
+                insert_pos = yap_match.end()
+                new_content = content[:insert_pos] + pending_block + content[insert_pos:]
+            else:
+                # No Yap Here section, add one
+                hash_match = self.tracker.HASH_PATTERN.search(content)
+                pending_block = f"\n## Yap Here\n\n<!-- Pending implementation:\n- [ ] {task}\n-->\n"
+                if hash_match:
+                    insert_pos = hash_match.start()
+                    new_content = content[:insert_pos].rstrip() + pending_block + "\n" + content[insert_pos:]
+                else:
+                    new_content = content.rstrip() + pending_block
+
+        self.write_yap(yap_path, new_content)
+        return f"Added pending task: {task}"
+
+    def complete_pending_task(self, yap_path: Path, task: str) -> str:
+        """Mark a pending task as complete. Returns status message."""
+        content = self.read_yap(yap_path)
+
+        import re
+        pending_pattern = re.compile(r'(<!--\s*Pending[^:]*:)(.*?)(-->)', re.DOTALL | re.IGNORECASE)
+        match = pending_pattern.search(content)
+
+        if not match:
+            return "No pending tasks found"
+
+        prefix, task_block, suffix = match.groups()
+
+        # Find and remove the matching task
+        task_lower = task.lower()
+        lines = task_block.strip().split('\n')
+        new_lines = []
+        found = False
+
+        for line in lines:
+            # Check if this line contains the task (partial match)
+            line_content = re.sub(r'^-\s*(?:\[\s*\])?\s*', '', line.strip())
+            if task_lower in line_content.lower() and not found:
+                found = True
+                continue  # Remove this task
+            new_lines.append(line)
+
+        if not found:
+            return f"Task not found: {task}"
+
+        # Check if all tasks are done
+        remaining_tasks = [l for l in new_lines if l.strip() and l.strip().startswith('-')]
+
+        if not remaining_tasks:
+            # All done - replace with "All implemented"
+            new_block = "<!-- All implemented -->"
+        else:
+            new_block = f"{prefix}\n" + '\n'.join(new_lines) + f"\n{suffix}"
+
+        new_content = content[:match.start()] + new_block + content[match.end():]
+        self.write_yap(yap_path, new_content)
+
+        if not remaining_tasks:
+            return f"Completed task: {task}. All tasks done!"
+        return f"Completed task: {task}. {len(remaining_tasks)} remaining."
+
+    def get_all_implementation_status(self) -> list[dict]:
+        """Get implementation status of all yap files including pending tasks."""
+        results = []
         for yap_file in self.find_all_yap_files():
             content = self.read_yap(yap_file)
-            if self.tracker.has_changes(content):
-                stored_hash, timestamp = self.tracker.get_hash_info(content)
-                current_hash = self.tracker.compute_hash(content)
-                changed.append((yap_file, stored_hash, current_hash, timestamp))
-        return changed
+            code_path = self.get_code_path_for_yap(yap_file)
+            status = self.tracker.check_status(content, code_path)
+            pending_tasks = self.get_pending_tasks(yap_file)
+
+            # Check for "All implemented" marker
+            all_implemented = "<!-- all implemented -->" in content.lower()
+
+            results.append({
+                "path": yap_file,
+                "code_path": code_path,
+                "yap_changed": status["yap_changed"],
+                "code_changed": status["code_changed"],
+                "pending_tasks": pending_tasks,
+                "all_implemented": all_implemented and not pending_tasks,
+                "timestamp": status["timestamp"],
+            })
+        return results
+
+    def get_changed_yap_files(self) -> list[dict]:
+        """
+        Get all yap files with changes (either yap or code changed).
+        Returns list of dicts with: path, yap_changed, code_changed, status info
+        """
+        results = []
+        for yap_file in self.find_all_yap_files():
+            content = self.read_yap(yap_file)
+            code_path = self.get_code_path_for_yap(yap_file)
+            status = self.tracker.check_status(content, code_path)
+
+            if status["yap_changed"] or status["code_changed"]:
+                results.append({
+                    "path": yap_file,
+                    "code_path": code_path,
+                    "yap_changed": status["yap_changed"],
+                    "code_changed": status["code_changed"],
+                    "timestamp": status["timestamp"],
+                    "stored_yap_hash": status["stored_yap_hash"],
+                    "current_yap_hash": status["current_yap_hash"],
+                    "stored_code_hash": status["stored_code_hash"],
+                    "current_code_hash": status["current_code_hash"],
+                })
+        return results
 
     def get_project_context(self) -> str:
         yap_files = self.find_all_yap_files()
         if not yap_files:
-            return "No YAP.md files found in project."
+            return "No .yap files found in project."
 
         context_parts = []
         for yap_file in yap_files:
@@ -441,19 +648,45 @@ class YapManager:
 
         return "\n\n".join(context_parts)
 
-    def get_recommended_yap_locations(self) -> list[Path]:
-        locations = [self.project_root]
+    def get_recommended_yap_locations(self) -> list[dict]:
+        """
+        Get recommended .yap files to create.
+        Returns list of dicts with: yap_path, code_path, type (project/file/dir)
+        """
+        recommendations = []
         code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.java', '.cpp', '.c', '.h'}
 
+        # Always recommend project.yap
+        project_yap = self.project_root / self.project_yap
+        if not project_yap.exists():
+            recommendations.append({
+                "yap_path": project_yap,
+                "code_path": self.project_root,
+                "type": "project"
+            })
+
+        # Find significant code files that don't have yap files
         for item in self.project_root.rglob('*'):
             if item.is_file() and item.suffix in code_extensions:
-                parent = item.parent
-                if parent not in locations and parent != self.project_root:
-                    code_files = [f for f in parent.iterdir() if f.suffix in code_extensions]
-                    if len(code_files) >= 1:
-                        locations.append(parent)
+                # Skip small files and __init__.py
+                if item.name.startswith('__'):
+                    continue
+                try:
+                    lines = len(item.read_text().splitlines())
+                    if lines < 50:  # Skip small files
+                        continue
+                except:
+                    continue
 
-        return sorted(set(locations), key=lambda p: len(p.parts))
+                yap_path = item.parent / f"{item.stem}{self.yap_extension}"
+                if not yap_path.exists():
+                    recommendations.append({
+                        "yap_path": yap_path,
+                        "code_path": item,
+                        "type": "file"
+                    })
+
+        return sorted(recommendations, key=lambda r: (r["type"] != "project", str(r["yap_path"])))
 
 
 # =============================================================================
@@ -813,7 +1046,7 @@ class FileManager:
         full_path = self._resolve_path(path)
         if not full_path.is_dir():
             raise NotADirectoryError(f"Not a directory: {path}")
-        
+
         items = []
         for item in sorted(full_path.iterdir()):
             if item.name.startswith('.'):
@@ -822,6 +1055,30 @@ class FileManager:
             suffix = "/" if item.is_dir() else ""
             items.append(f"{rel_path}{suffix}")
         return items
+
+    def remove_file(self, path: str) -> str:
+        """Remove a file. Cannot remove directories."""
+        full_path = self._resolve_path(path)
+
+        if not full_path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        if full_path.is_dir():
+            raise IsADirectoryError(f"Cannot remove directory: {path}. Use rmdir for empty directories.")
+
+        # Check yapignore protection
+        is_protected, pattern = self.yapignore.is_protected(path)
+        if is_protected:
+            raise PermissionError(f"File '{path}' is protected by .yapignore (pattern: '{pattern}')")
+
+        # Remove from cache if present
+        cache_key = str(full_path)
+        if cache_key in self._file_cache:
+            del self._file_cache[cache_key]
+
+        # Delete the file
+        full_path.unlink()
+        return f"Removed {path}"
     
     def _resolve_path(self, path: str) -> Path:
         p = Path(path)
@@ -838,7 +1095,7 @@ class FileManager:
         return self.yapignore.is_protected(path)
 
     def list_functions(self, path: str) -> list[dict]:
-        """List all functions/methods in a Python file with line numbers and signatures."""
+        """List all functions/methods in a Python or JavaScript/TypeScript file with line numbers and signatures."""
         full_path = self._resolve_path(path)
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {path}")
@@ -848,9 +1105,15 @@ class FileManager:
         if is_protected:
             raise PermissionError(f"File '{path}' is protected by .yapignore (pattern: '{pattern}')")
 
-        if not path.endswith('.py'):
-            raise ValueError(f"Only Python files supported, got: {path}")
+        if path.endswith('.py'):
+            return self._list_python_functions(full_path, path)
+        elif any(path.endswith(ext) for ext in ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.mts']):
+            return self._list_js_functions(full_path)
+        else:
+            raise ValueError(f"Only Python and JavaScript/TypeScript files supported, got: {path}")
 
+    def _list_python_functions(self, full_path: Path, path: str) -> list[dict]:
+        """List functions in a Python file using AST."""
         import ast
 
         content = full_path.read_text()
@@ -917,6 +1180,86 @@ class FileManager:
             if isinstance(node, ast.Module):
                 for child in node.body:
                     visit_node(child)
+
+        # Sort by line number
+        functions.sort(key=lambda f: f["line"])
+        return functions
+
+    def _list_js_functions(self, full_path: Path) -> list[dict]:
+        """List functions in a JavaScript/TypeScript file using regex patterns."""
+        content = full_path.read_text()
+        lines = content.split('\n')
+        functions = []
+
+        # Patterns for different JS/TS function styles
+        patterns = [
+            # Regular function: function name(args) or async function name(args)
+            (r'^(\s*)(export\s+)?(async\s+)?function\s+(\w+)\s*(<[^>]+>)?\s*\(([^)]*)\)', 'function'),
+            # Arrow function: const name = (args) => or const name = async (args) =>
+            (r'^(\s*)(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(?([^)=]*)\)?\s*=>', 'arrow'),
+            # Method in class/object: name(args) { or async name(args) {
+            (r'^(\s*)(public\s+|private\s+|protected\s+|static\s+|async\s+)*(readonly\s+)?(\w+)\s*(<[^>]+>)?\s*\(([^)]*)\)\s*(:\s*[^{]+)?\s*\{', 'method'),
+            # Class declaration: class Name
+            (r'^(\s*)(export\s+)?(abstract\s+)?class\s+(\w+)', 'class'),
+        ]
+
+        current_class = None
+        class_indent = -1
+
+        for line_num, line in enumerate(lines, 1):
+            # Track class context based on indentation
+            if current_class:
+                line_indent = len(line) - len(line.lstrip())
+                if line.strip() and line_indent <= class_indent:
+                    current_class = None
+                    class_indent = -1
+
+            for pattern, func_type in patterns:
+                match = re.match(pattern, line)
+                if match:
+                    groups = match.groups()
+
+                    if func_type == 'class':
+                        current_class = groups[3]
+                        class_indent = len(groups[0]) if groups[0] else 0
+                        continue
+
+                    name = ""
+                    params = ""
+                    is_async = False
+
+                    if func_type == 'function':
+                        is_async = bool(groups[2])
+                        name = groups[3]
+                        params = groups[5] if groups[5] else ""
+                    elif func_type == 'arrow':
+                        is_async = bool(groups[4])
+                        name = groups[3]
+                        params = groups[5] if groups[5] else ""
+                    elif func_type == 'method':
+                        modifiers = groups[1] or ""
+                        is_async = 'async' in modifiers
+                        name = groups[3]
+                        params = groups[5] if groups[5] else ""
+                        # Skip constructor-like patterns that aren't actually methods
+                        if name in ('if', 'for', 'while', 'switch', 'catch'):
+                            continue
+
+                    # Clean up params
+                    params = params.strip()
+                    if len(params) > 50:
+                        params = params[:47] + "..."
+
+                    full_name = f"{current_class}.{name}" if current_class and func_type == 'method' else name
+
+                    functions.append({
+                        "name": full_name,
+                        "line": line_num,
+                        "signature": f"({params})",
+                        "docstring": "",  # Could parse JSDoc but keeping it simple
+                        "is_async": is_async
+                    })
+                    break
 
         # Sort by line number
         functions.sort(key=lambda f: f["line"])
@@ -1002,19 +1345,30 @@ TOOLS = [
         }
     },
     {
-        "name": "list_functions",
-        "description": "List all functions/methods in a Python file with line numbers and signatures. Efficient way to understand file structure without reading entire content.",
+        "name": "remove_file",
+        "description": "Delete a file. Use with caution. Cannot remove directories or .yap files.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to Python file (.py)"}
+                "path": {"type": "string", "description": "Path to file to delete"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "list_functions",
+        "description": "List all functions/methods in a Python or JavaScript/TypeScript file with line numbers and signatures. Efficient way to understand file structure without reading entire content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to code file (.py, .js, .ts, .jsx, .tsx, .mjs, .mts)"}
             },
             "required": ["path"]
         }
     },
     {
         "name": "read_yap_chain",
-        "description": "Read YAP.md files relevant to a path. ALWAYS use before working on code.",
+        "description": "Read .yap files relevant to a path (project.yap + specific file.yap). ALWAYS use before working on code.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1025,47 +1379,47 @@ TOOLS = [
     },
     {
         "name": "update_yap",
-        "description": "Update a YAP.md file after agreeing on specs.",
+        "description": "Update a .yap file after agreeing on specs.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to YAP.md file"},
-                "content": {"type": "string", "description": "New content (preserve Notes section)"}
+                "path": {"type": "string", "description": "Path to .yap file"},
+                "content": {"type": "string", "description": "New content"}
             },
             "required": ["path", "content"]
         }
     },
     {
         "name": "mark_yap_implemented",
-        "description": "Mark YAP as implemented (updates hash). Use when done.",
+        "description": "Mark .yap as implemented (updates yap and code hashes). Use when done syncing yap with code.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to YAP.md file"}
+                "path": {"type": "string", "description": "Path to .yap file"}
             },
             "required": ["path"]
         }
     },
     {
         "name": "read_yap_section",
-        "description": "Read a specific section from a YAP.md file. More efficient than reading entire file. Use section names like 'Yap Here', 'What's Here', 'Key Decisions', etc.",
+        "description": "Read a specific section from a .yap file. More efficient than reading entire file. Sections: 'Yap Here', 'What This Does', 'Key Decisions', 'Contracts', etc.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to YAP.md file"},
-                "section": {"type": "string", "description": "Section name (e.g., 'Yap Here', 'What's Here', 'Key Decisions')"}
+                "path": {"type": "string", "description": "Path to .yap file"},
+                "section": {"type": "string", "description": "Section name (e.g., 'Yap Here', 'What This Does', 'Key Decisions')"}
             },
             "required": ["path", "section"]
         }
     },
     {
         "name": "write_yap_section",
-        "description": "Write/update a specific section in a YAP.md file. Creates section if it doesn't exist. Enforces YAP structure.",
+        "description": "Write/update a specific section in a .yap file. Creates section if it doesn't exist.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to YAP.md file"},
-                "section": {"type": "string", "description": "Section name (e.g., 'Yap Here', 'What's Here', 'Key Decisions')"},
+                "path": {"type": "string", "description": "Path to .yap file"},
+                "section": {"type": "string", "description": "Section name (e.g., 'Yap Here', 'What This Does', 'Key Decisions')"},
                 "content": {"type": "string", "description": "New content for the section (header will be auto-added if missing)"}
             },
             "required": ["path", "section", "content"]
@@ -1073,14 +1427,48 @@ TOOLS = [
     },
     {
         "name": "clear_yap_here",
-        "description": "Clear 'Yap Here' section after marking YAP as implemented. Call after mark_yap_implemented.",
+        "description": "Clear 'Yap Here' section after marking .yap as implemented.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to YAP.md file"},
+                "path": {"type": "string", "description": "Path to .yap file"},
                 "preserve_human_notes": {"type": "boolean", "description": "If true, ask human before clearing if notes found"}
             },
             "required": ["path"]
+        }
+    },
+    # Implementation state tools
+    {
+        "name": "get_implementation_status",
+        "description": "Get implementation status of all .yap files. Shows which have pending tasks, code drift, or are fully synced.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "add_pending_task",
+        "description": "Add a pending implementation task to a .yap file's 'Yap Here' section.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to .yap file"},
+                "task": {"type": "string", "description": "Task description to add"}
+            },
+            "required": ["path", "task"]
+        }
+    },
+    {
+        "name": "complete_pending_task",
+        "description": "Mark a pending task as complete in a .yap file. If all tasks done, updates to 'All implemented'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to .yap file"},
+                "task": {"type": "string", "description": "Task to mark complete (partial match OK)"}
+            },
+            "required": ["path", "task"]
         }
     },
     {
@@ -1099,7 +1487,7 @@ TOOLS = [
     # Reference management tools
     {
         "name": "list_refs",
-        "description": "List all stored references with their summaries. References are created when you read files, search, etc. Use select_refs to choose which to include in context.",
+        "description": "List all stored references with their summaries. Everything becomes a reference: tool outputs, actions, decisions, conversation. Auto-reviewed each turn.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -1138,6 +1526,18 @@ TOOLS = [
             },
             "required": ["ref_id"]
         }
+    },
+    {
+        "name": "switch_mode",
+        "description": "Switch between YAP_MODE and CODE_MODE. YAP_MODE: conversation, specs, proposals. CODE_MODE: implementation of approved specs only. STRICT ENTRY: CODE_MODE requires human approval, no PENDING specs, and implementation plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "description": "Target mode: 'YAP_MODE' or 'CODE_MODE'"},
+                "reason": {"type": "string", "description": "Why switching modes. For CODE_MODE: must show human approval and implementation plan"}
+            },
+            "required": ["mode", "reason"]
+        }
     }
 ]
 
@@ -1148,21 +1548,30 @@ TOOLS = [
 
 class ReferenceStore:
     """
-    Block-based reference storage for tool outputs.
-
+    Enhanced reference system that stores EVERYTHING except current user prompt.
+    
+    Everything becomes a reference:
+    - Tool outputs (file reads, searches, etc.)
+    - Agent actions (edits, creates, yap updates)
+    - Agent decisions (proposals, reasoning) 
+    - Human responses (approvals, clarifications)
+    - Context loads (yap content, system state)
+    
     Workflow:
-    1. Tool outputs are automatically stored as references
-    2. Agent uses 'select_references' to choose which refs to include in current context
-    3. Selected references are injected into the next API call
-    4. This keeps conversation history lean while allowing access to all data
+    1. ALL interactions stored as references with summaries
+    2. At start of each turn: auto-clear with iterative review
+    3. Agent decides what context to keep based on current task
+    4. Selected references injected into API calls
+    5. Process repeats each turn
     """
 
     def __init__(self):
-        self._refs = {}  # ref_id -> {content, tool_name, path, created_at, summary}
+        self._refs = {}  # ref_id -> {content, ref_type, tool_name, path, created_at, summary}
         self._counter = 0
         self._selected = set()  # Currently selected reference IDs
+        self._turn_summaries = []  # Summaries from previous turns
 
-    def store(self, content: str, tool_name: str, tool_input: dict) -> str:
+    def store(self, content: str, tool_name: str, tool_input: dict, ref_type: str = "tool_output") -> str:
         """Store content and return reference ID with summary."""
         self._counter += 1
         ref_id = f"ref_{self._counter}"
@@ -1172,38 +1581,89 @@ class ReferenceStore:
 
         # Create brief summary for reference listing
         lines = content.splitlines()
-        summary = self._create_brief_summary(content, tool_name, len(lines))
+        summary = self._create_enhanced_summary(content, tool_name, ref_type, path, len(lines))
 
         self._refs[ref_id] = {
             "content": content,
+            "ref_type": ref_type,
             "tool_name": tool_name,
             "path": path,
             "summary": summary,
             "lines": len(lines),
-            "chars": len(content)
+            "chars": len(content),
+            "created_at": time.time()
         }
 
         return ref_id
+    
+    def store_action(self, action_description: str, context: str = "", path: str = "") -> str:
+        """Store agent action as reference."""
+        return self.store(
+            content=f"Action: {action_description}\nContext: {context}",
+            tool_name="agent_action",
+            tool_input={"path": path},
+            ref_type="agent_action"
+        )
+    
+    def store_decision(self, decision: str, reasoning: str = "", context: str = "") -> str:
+        """Store agent decision as reference."""
+        return self.store(
+            content=f"Decision: {decision}\nReasoning: {reasoning}\nContext: {context}",
+            tool_name="agent_decision", 
+            tool_input={"path": ""},
+            ref_type="agent_decision"
+        )
+    
+    def store_conversation(self, content: str, speaker: str = "human") -> str:
+        """Store human conversation as reference."""
+        return self.store(
+            content=f"{speaker.title()}: {content}",
+            tool_name="conversation",
+            tool_input={"path": ""},
+            ref_type="conversation"
+        )
 
-    def _create_brief_summary(self, content: str, tool_name: str, line_count: int) -> str:
-        """Create a one-line summary for reference listing."""
-        if tool_name == "read_file":
-            return f"File content ({line_count} lines)"
-        elif tool_name == "read_yap_chain":
-            return f"YAP chain ({line_count} lines)"
-        elif tool_name == "read_yap_section":
-            return f"YAP section ({line_count} lines)"
-        elif tool_name == "search_files":
-            match_count = content.count('\n') - 1 if "Found" in content else 0
-            return f"Search results ({match_count} matches)"
-        elif tool_name == "list_functions":
-            func_count = content.count('\n')
-            return f"Functions ({func_count} items)"
-        elif tool_name == "list_directory":
-            item_count = content.count('\n')
-            return f"Directory listing ({item_count} items)"
+    def _create_enhanced_summary(self, content: str, tool_name: str, ref_type: str, path: str, line_count: int) -> str:
+        """Create enhanced summary for all reference types."""
+        if ref_type == "tool_output":
+            if tool_name == "read_file":
+                # Extract key info from file content
+                if path.endswith('.py'):
+                    class_count = content.count('\nclass ')
+                    func_count = content.count('\ndef ')
+                    return f"Python file: {class_count} classes, {func_count} functions ({line_count} lines)"
+                elif path.endswith('.yap'):
+                    if "Key Decisions" in content:
+                        return f"YAP file: decisions, contracts, specs ({line_count} lines)"
+                    return f"YAP file: project context ({line_count} lines)"
+                else:
+                    return f"File content ({line_count} lines)"
+            elif tool_name == "search_files":
+                match_count = content.count('\n') - 1 if "Found" in content else 0
+                pattern = content.split('\n')[0].split(': ')[-1] if 'Found' in content else "pattern"
+                return f"Search '{pattern}': {match_count} matches found"
+            elif tool_name == "list_functions":
+                return f"Functions in {path}: {line_count} items"
+            elif tool_name == "list_directory":
+                return f"Directory {path}: {line_count} items"
+            else:
+                return f"{tool_name} output ({line_count} lines)"
+                
+        elif ref_type == "agent_action":
+            action = content.split('\n')[0].replace('Action: ', '')
+            return f"Action: {action[:50]}{'...' if len(action) > 50 else ''}"
+            
+        elif ref_type == "agent_decision":
+            decision = content.split('\n')[0].replace('Decision: ', '')
+            return f"Decision: {decision[:50]}{'...' if len(decision) > 50 else ''}"
+            
+        elif ref_type == "conversation":
+            speaker = content.split(':')[0]
+            text = content.split(':', 1)[1].strip()[:50]
+            return f"{speaker}: {text}{'...' if len(content.split(':', 1)[1].strip()) > 50 else ''}"
+            
         else:
-            return f"{tool_name} output ({line_count} lines)"
+            return f"{ref_type} ({line_count} lines)"
 
     def list_refs(self, use_colors: bool = True) -> str:
         """List all available references with summaries."""
@@ -1254,7 +1714,7 @@ class ReferenceStore:
             else:
                 invalid.append(ref_id)
 
-        result = f"Selected {len(valid)} reference(s)"
+        result = f"{Colors.ORANGE}Selected {len(valid)} reference(s){Colors.RESET}"
         if invalid:
             result += f". Unknown: {', '.join(invalid)}"
         return result
@@ -1263,32 +1723,192 @@ class ReferenceStore:
         """Deselect references from context."""
         for ref_id in ref_ids:
             self._selected.discard(ref_id)
-        return f"Deselected {len(ref_ids)} reference(s)"
+        return f"{Colors.ORANGE}Deselected {len(ref_ids)} reference(s){Colors.RESET}"
 
     def deselect_all(self) -> str:
         """Clear all selections."""
         count = len(self._selected)
         self._selected.clear()
-        return f"Deselected all ({count}) references"
+        return f"{Colors.ORANGE}Deselected all ({count}) references{Colors.RESET}"
 
     def get_selected_content(self) -> str:
         """Get content of all selected references for context injection."""
-        if not self._selected:
-            return ""
-
         parts = []
-        for ref_id in sorted(self._selected):
-            if ref_id in self._refs:
-                info = self._refs[ref_id]
-                parts.append(f"=== {ref_id}: {info['path']} ===\n{info['content']}")
+        
+        # Include turn summaries from previous iterations
+        if self._turn_summaries:
+            summary_content = "\n".join(f"- {summary}" for summary in self._turn_summaries[-3:])
+            parts.append(f"=== Previous Turn Summaries ===\n{summary_content}")
+        
+        # Include current selected references
+        if self._selected:
+            for ref_id in sorted(self._selected):
+                if ref_id in self._refs:
+                    info = self._refs[ref_id]
+                    ref_type = info.get('ref_type', 'tool_output')
+                    path_display = f" ({info['path']})" if info['path'] else ""
+                    parts.append(f"=== {ref_id}: {ref_type}{path_display} ===\n{info['content']}")
 
-        return "\n\n".join(parts)
+        return "\n\n".join(parts) if parts else ""
 
     def get(self, ref_id: str) -> str | None:
         """Get content of a specific reference."""
         if ref_id in self._refs:
             return self._refs[ref_id]["content"]
         return None
+
+    def generate_summary(self) -> str:
+        """Generate summary of all references before clearing."""
+        if not self._refs:
+            return "No references to summarize."
+        
+        summaries = []
+        for ref_id, info in self._refs.items():
+            selected_marker = "●" if ref_id in self._selected else "○"
+            summaries.append(f"  {selected_marker} {ref_id}: {info['path']} - {info['summary']}")
+        
+        return f"References to be cleared:\n" + "\n".join(summaries)
+
+    def get_keep_selection_prompt(self) -> str:
+        """Generate prompt asking which references to keep."""
+        if not self._refs:
+            return ""
+        
+        lines = ["Which references would you like to keep for the next conversation turn?"]
+        for ref_id, info in self._refs.items():
+            selected_marker = "●" if ref_id in self._selected else "○"
+            lines.append(f"  {selected_marker} {ref_id}: {info['path']} - {info['summary']}")
+        
+        lines.append("\nEnter reference IDs to keep (space-separated), or 'none' to clear all:")
+        return "\n".join(lines)
+
+    def start_turn_review(self, current_task_context: str = "") -> str:
+        """Agent reviews all reference summaries and decides what to keep for current turn."""
+        if not self._refs:
+            return "Turn review: no references to review"
+        
+        original_count = len(self._refs)
+        
+        # Auto-generate summaries for all references
+        self._auto_summarize_all()
+        
+        # Agent decides what's relevant to current task
+        relevant_refs = self._agent_filter_relevant(current_task_context)
+        
+        # Keep essential context (always keep certain types)
+        essential_refs = self._get_essential_refs()
+        refs_to_keep = relevant_refs | essential_refs
+        
+        # Create turn summary before clearing
+        cleared_summary = self._create_turn_summary(refs_to_keep)
+        if cleared_summary:
+            self._turn_summaries.append(cleared_summary)
+            # Keep only last 5 turn summaries
+            self._turn_summaries = self._turn_summaries[-5:]
+        
+        # Clear non-essential references
+        refs_cleared = []
+        for ref_id in list(self._refs.keys()):
+            if ref_id not in refs_to_keep:
+                del self._refs[ref_id]
+                refs_cleared.append(ref_id)
+                self._selected.discard(ref_id)
+        
+        # Auto-select kept references
+        self._selected = refs_to_keep & set(self._refs.keys())
+        
+        kept_count = len(refs_to_keep & set(self._refs.keys()))
+        if kept_count > 0:
+            # Show first few kept refs to avoid clutter
+            kept_refs = sorted(refs_to_keep & set(self._refs.keys()))
+            kept_display = ', '.join(kept_refs[:3])
+            if len(kept_refs) > 3:
+                kept_display += f" +{len(kept_refs)-3} more"
+            return f"Turn review: kept {kept_count}/{original_count} refs ({kept_display})"
+        else:
+            self._counter = 0  # Reset counter if all cleared
+            return f"Turn review: cleared all {original_count} references"
+    
+    def _auto_summarize_all(self):
+        """Ensure all references have summaries."""
+        for ref_id, info in self._refs.items():
+            if 'summary' not in info or not info['summary']:
+                info['summary'] = self._create_enhanced_summary(
+                    info['content'], 
+                    info['tool_name'], 
+                    info.get('ref_type', 'tool_output'),
+                    info.get('path', ''),
+                    info.get('lines', 0)
+                )
+    
+    def _agent_filter_relevant(self, current_task_context: str) -> set:
+        """Agent logic to determine relevant references."""
+        relevant = set()
+        
+        # Extract current files/paths from context
+        current_files = set()
+        if current_task_context:
+            # Look for file patterns in context
+            import re
+            file_patterns = re.findall(r'\b\w+\.(py|yap|js|ts|json|md)\b', current_task_context.lower())
+            current_files.update(pattern.split('.')[0] for pattern in file_patterns)
+        
+        for ref_id, info in self._refs.items():
+            path = info.get('path', '')
+            ref_type = info.get('ref_type', 'tool_output')
+            
+            # Always keep recent conversation and decisions
+            if ref_type in ['conversation', 'agent_decision']:
+                relevant.add(ref_id)
+            
+            # Keep file content if mentioned in current task
+            elif ref_type == 'tool_output' and path:
+                path_base = path.split('.')[0].lower()
+                if any(cf in path_base or path_base in cf for cf in current_files):
+                    relevant.add(ref_id)
+            
+            # Keep recent actions (last 3)
+            elif ref_type == 'agent_action':
+                # Keep recent actions - get last 3 action refs
+                action_refs = [(rid, info) for rid, info in self._refs.items() 
+                              if info.get('ref_type') == 'agent_action']
+                action_refs.sort(key=lambda x: x[1].get('created_at', 0), reverse=True)
+                if ref_id in [r[0] for r in action_refs[:3]]:
+                    relevant.add(ref_id)
+        
+        return relevant
+    
+    def _get_essential_refs(self) -> set:
+        """Get references that should always be kept."""
+        essential = set()
+        
+        for ref_id, info in self._refs.items():
+            path = info.get('path', '')
+            
+            # Always keep current project.yap and recent yap files
+            if path and (path == 'project.yap' or path.endswith('.yap')):
+                essential.add(ref_id)
+                
+        return essential
+    
+    def _create_turn_summary(self, kept_refs: set) -> str:
+        """Create summary of cleared references for future turns."""
+        cleared_refs = {rid: info for rid, info in self._refs.items() if rid not in kept_refs}
+        
+        if not cleared_refs:
+            return ""
+        
+        summaries = []
+        for ref_id, info in cleared_refs.items():
+            ref_type = info.get('ref_type', 'tool_output')
+            summary = info.get('summary', 'No summary')
+            summaries.append(f"{ref_type}: {summary}")
+        
+        return f"Turn summary ({len(cleared_refs)} items): " + "; ".join(summaries[:5])
+    
+    def auto_clear_with_prompt(self, prompt_callback=None) -> str:
+        """Legacy method - now redirects to start_turn_review."""
+        return self.start_turn_review("user interaction")
 
     def clear(self):
         """Clear all references (e.g., when conversation is cleared)."""
@@ -1301,7 +1921,7 @@ class YapAgent:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.client = anthropic.Anthropic()
-        self.yap_manager = YapManager(config.project_root, config.yap_filename)
+        self.yap_manager = YapManager(config.project_root, config.yap_extension, config.project_yap)
         self.file_manager = FileManager(config.project_root)
         self.conversation_history = []
         self.system_prompt = self._build_system_prompt()
@@ -1312,43 +1932,64 @@ class YapAgent:
         self.total_cache_creation_tokens = 0
         # Reference-based context management
         self.refs = ReferenceStore()
+        # Mode system - start in YAP_MODE
+        self.mode = "YAP_MODE"
+        # Tool call counter for reference cycling
+        self.tool_call_count = 0
+        self.refs_cleared_this_iteration = False
+        self.pending_mode_switch = None  # Requires user approval
 
     def _build_system_prompt(self) -> str:
-        # Condensed YAP spec - key rules only, not full document
+        # Condensed YAP spec - key rules only
         yap_spec_condensed = """# YAP Format (Condensed)
 
+## GOLDEN RULES
+1. YAP FIRST, THEN CODE - Agree on specs BEFORE writing code
+2. HUMAN APPROVAL REQUIRED - Proposals are PENDING until human says "yes"/"approved"
+3. CLEAR ATTRIBUTION - Mark your proposals as (PENDING) until approved
+
 ## File Structure
-- YAP.md files live with code they describe
-- Child YAP.md overrides parent for its directory
+- project.yap - project-level context
+- foo.yap - context for foo.py (or foo/ directory)
 
-## Allowed Sections (## level only)
-- Yap Here - human thoughts + Agent Working State subsection
-- Quick Map - codebase guide (root only)
-- Global Conventions - project-wide rules (root only)
-- Architecture Decisions - major technical choices
-- Extension Guidelines - how to add functionality
-- What's Here - architectural capabilities (NOT file listing)
-- Depends On - upstream dependencies
-- Used By - downstream dependents
-- Key Decisions - important choices with :decision: marker
+## Proposing Changes
+Always propose in Yap Here with clear PENDING marker:
+<!-- AGENT PROPOSAL (pending approval):
+- Feature X
+  > why: reasoning
+  > decided: agent, human approved (PENDING)
+-->
+WAIT for "yes"/"approved"/"looks good" before implementing.
 
-## Spec Format
-> :marker: statement (decided: human|conversation|agent)
-> intent: what this achieves
-> why: reasoning behind it
+## Allowed Sections
+- Yap Here - proposals, conversation, implementation state
+- What This Does - architectural purpose
+- Key Decisions - approved choices with attribution
+- Contracts - what must be true
+- Depends On / Used By - relationships
 
-## Markers
-- :warn: - gotchas, edge cases
-- :contract: - must be true, enforced
-- :decision: - explicit choice made
-- :extends: - extension points
+## Implementation State (in Yap Here)
+- <!-- All implemented --> - everything in sync
+- <!-- Not implemented --> - nothing implemented yet
+- <!-- Pending: - item1 - item2 --> - specific items to implement
+
+## Attribution (for approved decisions)
+- decided: human - human specified
+- decided: agent, human approved - you proposed, human agreed
+- decided: conversation - back-and-forth discussion
 
 ## Rules
 1. Use read_yap_chain BEFORE working on code
-2. Use read_yap_section/write_yap_section for efficiency
-3. Never use read_file/write_file/edit_file on YAP files
-4. Clear "Yap Here" after marking implemented
-5. Specs need intent/why/decided - no vague statements"""
+2. PROPOSE changes, WAIT for approval, THEN implement
+3. Never use read_file/write_file/edit_file on .yap files
+4. mark_yap_implemented updates both code and yap hashes
+
+## Iteration Limits
+You have ~30 tool calls per turn. When running low:
+1. Wrap up current task cleanly
+2. Save state in Yap Here if needed
+3. Return to human with summary
+Don't leave work half-done."""
 
         system_prompt_path = Path(__file__).parent / "AGENT-SYSTEM-PROMPT.md"
         agent_instructions = system_prompt_path.read_text() if system_prompt_path.exists() else ""
@@ -1361,16 +2002,40 @@ class YapAgent:
 ## Agent Instructions
 {agent_instructions}
 
-## Workflow
-1. CLARIFY vague intent before proposing specs
-2. Use read_yap_chain to understand existing architecture
-3. PROPOSE specs with intent/why/decided before implementing
-4. WAIT for approval before coding
-5. Use mark_yap_implemented when done
-6. Use task_complete to summarize
+## Workflow (Conversational)
+The workflow is iterative, not linear. Go back and forth with human:
+- Propose → discuss → refine → implement → review → adjust
+- You can implement, then return to discussion
+- Always get approval before major changes
+- When done with a phase, return to human for next steps
+
+## Mode System
+You operate in two modes that enforce the yap-first workflow:
+
+**YAP_MODE (default)**: Conversation, questions, spec proposals
+- Available tools: yap tools + shared tools (list_directory, refs)
+- Focus on understanding requirements from yap files, proposing specs, getting approval
+- Cannot search or read code files - work from yap documentation
+
+**CODE_MODE**: Implementation
+- Available tools: code tools (read_file, search_files, edit_file, write_file) + shared tools
+- Focus on implementing approved specs
+
+**Mode Switching (requires user approval):**
+When you call switch_mode, it creates a PENDING request that the user must approve.
+
+```
+Agent: [calls switch_mode with reason: "Implement approved rate limiting specs"]
+System: "Mode switch requested: YAP_MODE → CODE_MODE. Waiting for user approval..."
+Human: "yes" / "approved" / "go ahead"  (or "no" to reject)
+System: [executes mode switch]
+```
+
+The user sees the pending switch and your reason, then decides whether to approve.
+Always provide a clear reason explaining what you plan to do in the new mode.
 
 ## Reference System
-Tool outputs (file reads, searches, etc.) are automatically stored as references.
+Everything becomes a reference: tool outputs, agent actions, decisions, conversation.
 - Use list_refs to see available references
 - Use select_refs to add references to your working context (they'll be included in each API call)
 - Use deselect_refs to remove references when done (reduces token usage)
@@ -1379,12 +2044,36 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
     
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         try:
+            # Mode restrictions
+            yap_tools = {
+                "read_yap_chain", "read_yap_section", "write_yap_section", "update_yap",
+                "mark_yap_implemented", "clear_yap_here", "get_implementation_status",
+                "add_pending_task", "complete_pending_task"
+            }
+
+            code_tools = {
+                "read_file", "file_info", "search_files", "edit_file", "write_file",
+                "remove_file", "list_functions"
+            }
+
+            shared_tools = {
+                "list_refs", "select_refs", "deselect_refs", "get_ref", "task_complete",
+                "switch_mode",  # Available in both modes
+                "list_directory"  # Read-only directory listing, useful in both modes
+            }
+            
+            # Check mode restrictions
+            if self.mode == "YAP_MODE" and tool_name in code_tools and tool_name not in shared_tools:
+                return f"Error: {tool_name} not available in YAP_MODE. Use switch_mode to change to CODE_MODE first."
+            
+            if self.mode == "CODE_MODE" and tool_name in yap_tools and tool_name not in shared_tools and tool_name != "switch_mode":
+                return f"Error: {tool_name} not available in CODE_MODE. Use switch_mode to change to YAP_MODE first."
             if tool_name == "read_file":
                 if "path" not in tool_input:
                     return "Error: Missing required parameter 'path'"
-                # Block YAP files - use read_yap_section instead
-                if tool_input["path"].endswith(self.config.yap_filename):
-                    return f"Error: Use read_yap_section or read_yap_chain for YAP files, not read_file."
+                # Block .yap files - use read_yap_section instead
+                if tool_input["path"].endswith(self.config.yap_extension):
+                    return f"Error: Use read_yap_section or read_yap_chain for .yap files, not read_file."
                 start_line = tool_input.get("start_line")
                 end_line = tool_input.get("end_line")
                 content, total_lines, was_truncated = self.file_manager.read_file(
@@ -1397,7 +2086,7 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 result = f"{tool_input['path']} ({range_str}){truncate_note}:\n\n{content}"
                 # Store as reference
                 ref_id = self.refs.store(result, tool_name, tool_input)
-                return f"[Stored as {ref_id}]\n{result}"
+                return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
 
             elif tool_name == "file_info":
                 if "path" not in tool_input:
@@ -1431,38 +2120,70 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 # Store as reference if results are substantial
                 if len(results) > 3:
                     ref_id = self.refs.store(result, tool_name, tool_input)
-                    return f"[Stored as {ref_id}]\n{result}"
+                    return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
                 return result
 
             elif tool_name == "edit_file":
                 if "path" not in tool_input:
                     return "Error: Missing required parameter 'path'"
-                # Block YAP files - use write_yap_section instead
-                if tool_input["path"].endswith(self.config.yap_filename):
-                    return f"Error: Use write_yap_section for YAP files, not edit_file."
+                # Block .yap files - use write_yap_section instead
+                if tool_input["path"].endswith(self.config.yap_extension):
+                    return f"Error: Use write_yap_section for .yap files, not edit_file."
                 if "old_string" not in tool_input:
                     return "Error: Missing required parameter 'old_string'"
                 if "new_string" not in tool_input:
                     return "Error: Missing required parameter 'new_string'"
-                return self.file_manager.edit_file(
+                
+                result = self.file_manager.edit_file(
                     tool_input["path"], tool_input["old_string"], tool_input["new_string"]
                 )
+                
+                # Store action reference
+                old_preview = tool_input["old_string"][:50] + ("..." if len(tool_input["old_string"]) > 50 else "")
+                new_preview = tool_input["new_string"][:50] + ("..." if len(tool_input["new_string"]) > 50 else "")
+                action_ref = self.refs.store_action(
+                    f"Edited {tool_input['path']}: '{old_preview}' → '{new_preview}'",
+                    context=f"Modified existing file content",
+                    path=tool_input["path"]
+                )
+                
+                return result
 
             elif tool_name == "write_file":
                 if "path" not in tool_input:
                     return "Error: Missing required parameter 'path'"
-                # Block YAP files - use write_yap_section or update_yap instead
-                if tool_input["path"].endswith(self.config.yap_filename):
-                    return f"Error: Use write_yap_section or update_yap for YAP files, not write_file."
+                # Block .yap files - use write_yap_section or update_yap instead
+                if tool_input["path"].endswith(self.config.yap_extension):
+                    return f"Error: Use write_yap_section or update_yap for .yap files, not write_file."
                 if "content" not in tool_input:
                     return "Error: Missing required parameter 'content'"
-                return self.file_manager.write_file(tool_input["path"], tool_input["content"])
+                
+                result = self.file_manager.write_file(tool_input["path"], tool_input["content"])
+                
+                # Store action reference
+                content_size = len(tool_input["content"])
+                line_count = tool_input["content"].count('\n') + 1
+                action_ref = self.refs.store_action(
+                    f"Created {tool_input['path']} ({content_size} chars, {line_count} lines)",
+                    context="Created new file",
+                    path=tool_input["path"]
+                )
+                
+                return result
 
             elif tool_name == "list_directory":
                 if "path" not in tool_input:
                     return "Error: Missing required parameter 'path'"
                 items = self.file_manager.list_directory(tool_input["path"])
                 return f"Contents of {tool_input['path']}:\n" + "\n".join(items)
+
+            elif tool_name == "remove_file":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                # Block .yap files
+                if tool_input["path"].endswith(self.config.yap_extension):
+                    return f"Error: Cannot remove .yap files directly."
+                return self.file_manager.remove_file(tool_input["path"])
 
             elif tool_name == "list_functions":
                 if "path" not in tool_input:
@@ -1479,7 +2200,7 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 # Store as reference if many functions
                 if len(functions) > 5:
                     ref_id = self.refs.store(result, tool_name, tool_input)
-                    return f"[Stored as {ref_id}]\n{result}"
+                    return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
                 return result
 
             elif tool_name == "read_yap_chain":
@@ -1487,19 +2208,21 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                     return "Error: Missing required parameter 'path'"
                 yap_files = self.yap_manager.get_yap_for_path(tool_input["path"])
                 if not yap_files:
-                    return f"No YAP.md files found for: {tool_input['path']}"
+                    return f"No .yap files found for: {tool_input['path']}"
 
                 result_parts = []
                 for yap_file in yap_files:
                     rel_path = yap_file.relative_to(self.yap_manager.project_root)
                     content = self.yap_manager.read_yap(yap_file)
-                    has_changes = self.yap_manager.tracker.has_changes(content)
-                    status = " (pending changes)" if has_changes else " (implemented)"
+                    code_path = self.yap_manager.get_code_path_for_yap(yap_file)
+                    status_info = self.yap_manager.tracker.check_status(content, code_path)
+                    has_changes = status_info["yap_changed"] or status_info["code_changed"]
+                    status = " (pending changes)" if has_changes else " (synced)"
                     result_parts.append(f"=== {rel_path}{status} ===\n{content}")
                 result = "\n\n".join(result_parts)
                 # Store as reference
                 ref_id = self.refs.store(result, tool_name, tool_input)
-                return f"[Stored as {ref_id}]\n{result}"
+                return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
 
             elif tool_name == "update_yap":
                 if "path" not in tool_input:
@@ -1563,6 +2286,15 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                     return f"Error: YAP file not found: {tool_input['path']}"
 
                 result = self.yap_manager.write_yap_section(yap_path, tool_input["section"], tool_input["content"])
+                
+                # Store action reference
+                content_preview = tool_input["content"][:100].replace('\n', ' ')
+                action_ref = self.refs.store_action(
+                    f"Updated {tool_input['section']} in {tool_input['path']}: {content_preview}{'...' if len(tool_input['content']) > 100 else ''}",
+                    context="Modified YAP section",
+                    path=tool_input["path"]
+                )
+                
                 return result
 
             elif tool_name == "clear_yap_here":
@@ -1580,6 +2312,68 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 else:
                     self.yap_manager.write_yap(yap_path, updated_content)
                     return f"Cleared 'Yap Here' section in {tool_input['path']}"
+
+            # Implementation state tools
+            elif tool_name == "get_implementation_status":
+                statuses = self.yap_manager.get_all_implementation_status()
+                if not statuses:
+                    return "No .yap files found in project."
+
+                lines = ["Implementation Status:"]
+                for s in statuses:
+                    rel_path = s["path"].relative_to(self.yap_manager.project_root)
+
+                    # Determine status indicator
+                    if s["all_implemented"]:
+                        indicator = f"{Colors.GREEN}✓{Colors.RESET}"
+                        status_text = "all implemented"
+                    elif s["code_changed"]:
+                        indicator = f"{Colors.RED}⚠{Colors.RESET}"
+                        status_text = "code drifted"
+                    elif s["pending_tasks"]:
+                        indicator = f"{Colors.YELLOW}○{Colors.RESET}"
+                        status_text = f"{len(s['pending_tasks'])} pending"
+                    elif s["yap_changed"]:
+                        indicator = f"{Colors.YELLOW}△{Colors.RESET}"
+                        status_text = "yap changed"
+                    else:
+                        indicator = f"{Colors.DIM}?{Colors.RESET}"
+                        status_text = "unknown"
+
+                    lines.append(f"  {indicator} {rel_path} - {status_text}")
+
+                    # Show pending tasks if any
+                    if s["pending_tasks"]:
+                        for task in s["pending_tasks"][:3]:  # Show first 3
+                            lines.append(f"      - {task}")
+                        if len(s["pending_tasks"]) > 3:
+                            lines.append(f"      ... and {len(s['pending_tasks']) - 3} more")
+
+                return "\n".join(lines)
+
+            elif tool_name == "add_pending_task":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                if "task" not in tool_input:
+                    return "Error: Missing required parameter 'task'"
+                yap_path = Path(tool_input["path"])
+                if not yap_path.is_absolute():
+                    yap_path = self.yap_manager.project_root / yap_path
+                if not yap_path.exists():
+                    return f"Error: YAP file not found: {tool_input['path']}"
+                return self.yap_manager.add_pending_task(yap_path, tool_input["task"])
+
+            elif tool_name == "complete_pending_task":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                if "task" not in tool_input:
+                    return "Error: Missing required parameter 'task'"
+                yap_path = Path(tool_input["path"])
+                if not yap_path.is_absolute():
+                    yap_path = self.yap_manager.project_root / yap_path
+                if not yap_path.exists():
+                    return f"Error: YAP file not found: {tool_input['path']}"
+                return self.yap_manager.complete_pending_task(yap_path, tool_input["task"])
 
             elif tool_name == "task_complete":
                 summary = tool_input.get("summary", "Done")
@@ -1637,6 +2431,31 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 if content is None:
                     return f"Error: Reference '{ref_id}' not found. Use list_refs to see available references."
                 return content
+
+            elif tool_name == "switch_mode":
+                new_mode = tool_input.get("mode", "").upper()
+                reason = tool_input.get("reason", "")
+
+                if new_mode not in ["YAP_MODE", "CODE_MODE"]:
+                    return "Error: Mode must be 'YAP_MODE' or 'CODE_MODE'"
+
+                if new_mode == self.mode:
+                    return f"Already in {new_mode}"
+
+                if not reason:
+                    return "Error: Must provide reason for mode switch"
+
+                # Store pending mode switch - requires user approval
+                self.pending_mode_switch = {
+                    "from": self.mode,
+                    "to": new_mode,
+                    "reason": reason
+                }
+
+                return (f"{Colors.ORANGE}Mode switch requested: {self.mode} → {new_mode}{Colors.RESET}\n"
+                       f"Reason: {reason}\n\n"
+                       f"{Colors.BOLD}Waiting for user approval...{Colors.RESET}\n"
+                       f"User must respond to approve or reject this mode switch.")
 
             return f"Unknown tool: {tool_name}"
         except Exception as e:
@@ -1770,11 +2589,24 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                     raise
     
     def run(self, user_request: str, continue_conversation: bool = True) -> str:
+        # Store human conversation as reference (everything becomes a reference except current prompt)
+        if continue_conversation:
+            self.refs.store_conversation(user_request, "human")
+        
+        # ITERATIVE REVIEW: Agent reviews all references and decides what to keep
+        if continue_conversation and self.refs._refs:
+            review_result = self.refs.start_turn_review(user_request)
+            print(f"{Colors.DIM}{review_result}{Colors.RESET}")
+        
         self.conversation_history.append({"role": "user", "content": user_request})
         messages = self.conversation_history.copy()
 
-        max_iterations = 30
+        max_iterations = 50
         for iteration in range(1, max_iterations + 1):
+            # Reset per-iteration state
+            self.tool_call_count = 0
+            self.refs_cleared_this_iteration = False
+            
             try:
                 content, stop_reason = self._call_api_streaming(messages)
             except KeyboardInterrupt:
@@ -1785,6 +2617,9 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 final_text = "".join(b.text for b in content if hasattr(b, "text"))
                 if continue_conversation:
                     self.conversation_history.append({"role": "assistant", "content": content})
+                    # Store agent response as reference
+                    self.refs.store_conversation(final_text, "agent")
+                    # Note: References now cleared at START of next turn via start_turn_review
                 # Text already streamed to terminal
                 return final_text
 
@@ -1793,6 +2628,9 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 final_text = "".join(b.text for b in content if hasattr(b, "text"))
                 if continue_conversation:
                     self.conversation_history.append({"role": "assistant", "content": content})
+                    # Store agent response as reference
+                    self.refs.store_conversation(final_text, "agent")
+                    # Note: References now cleared at START of next turn via start_turn_review
                 return final_text
 
             messages.append({"role": "assistant", "content": content})
@@ -1802,6 +2640,9 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                 tool_input = tool_use.input if hasattr(tool_use, "input") else tool_use.get("input", {})
                 tool_name = tool_use.name if hasattr(tool_use, "name") else tool_use.get("name", "")
                 tool_id = tool_use.id if hasattr(tool_use, "id") else tool_use.get("id", "")
+
+                # Increment tool call counter
+                self.tool_call_count += 1
 
                 result = self._execute_tool(tool_name, tool_input)
 
@@ -1813,6 +2654,10 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                     summary = self._get_tool_summary(tool_name, tool_input, result)
                     print(f"  {Colors.DIM}→ {summary}{Colors.RESET}")
 
+                # Check if we should clear references mid-iteration
+                if self._should_clear_mid_iteration(tool_name):
+                    self._mid_iteration_clear_refs(tool_name)
+
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_id,
@@ -1823,11 +2668,18 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
                     if continue_conversation:
                         self.conversation_history.append({"role": "assistant", "content": content})
                         self.conversation_history.append({"role": "user", "content": tool_results})
+                        # Store task completion as reference
+                        self.refs.store_action("Task completed", "TASK_COMPLETE signal received")
+                        # Note: References now cleared at START of next turn via start_turn_review
                     return "Task completed"
 
             messages.append({"role": "user", "content": tool_results})
 
         print_warning("Max iterations reached")
+        if continue_conversation:
+            # Store max iterations reached as reference
+            self.refs.store_action("Max iterations reached", f"Hit limit of {max_iterations} iterations")
+            # Note: References now cleared at START of next turn via start_turn_review
         return "Max iterations reached"
 
     def _get_tool_summary(self, tool_name: str, tool_input: dict, result: str) -> str:
@@ -1880,6 +2732,73 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
             return "task complete"
         return f"{tool_name}"
     
+    def _should_clear_mid_iteration(self, tool_name: str) -> bool:
+        """Determine if references should be cleared mid-iteration."""
+        # Clear after heavy operations
+        heavy_ops = ["read_file", "search_files", "read_yap_chain", "list_functions"]
+        if tool_name in heavy_ops:
+            return True
+        
+        # Clear every 7 tool calls
+        if self.tool_call_count > 0 and self.tool_call_count % 7 == 0:
+            return True
+        
+        return False
+
+    def _smart_retain_refs(self) -> set[str]:
+        """Get reference IDs to retain during mid-iteration clearing."""
+        if not self.refs._refs:
+            return set()
+        
+        # Sort refs by creation order (newest first)
+        sorted_refs = sorted(
+            self.refs._refs.items(), 
+            key=lambda x: int(x[0].split('_')[1]),  # Extract number from ref_X
+            reverse=True
+        )
+        
+        # Keep last 2-3 refs (most recently created)
+        refs_to_keep = set()
+        for ref_id, info in sorted_refs[:3]:
+            refs_to_keep.add(ref_id)
+        
+        # Also keep currently selected refs that are in the retention list
+        retained_selected = refs_to_keep & self.refs._selected
+        
+        return retained_selected
+
+    def _mid_iteration_clear_refs(self, tool_name: str) -> str:
+        """Clear references mid-iteration with smart retention."""
+        if not self.refs._refs or self.refs_cleared_this_iteration:
+            return ""  # Skip if already cleared this iteration
+        
+        refs_to_keep = self._smart_retain_refs()
+        
+        # Clear refs not in keep list
+        refs_cleared = []
+        for ref_id in list(self.refs._refs.keys()):
+            if ref_id not in refs_to_keep:
+                del self.refs._refs[ref_id]
+                refs_cleared.append(ref_id)
+                self.refs._selected.discard(ref_id)
+        
+        # Update selected to only include kept refs
+        self.refs._selected &= refs_to_keep
+        
+        if refs_cleared:
+            self.refs_cleared_this_iteration = True
+            reason = f"after {tool_name}" if tool_name in ["read_file", "search_files", "read_yap_chain", "list_functions"] else f"at {self.tool_call_count} calls"
+            print(f"{Colors.DIM}  → cleared {len(refs_cleared)} refs ({reason}), kept {len(refs_to_keep)}{Colors.RESET}")
+            return f"Mid-iteration clear: removed {len(refs_cleared)} refs, kept {len(refs_to_keep)}"
+        
+        return ""
+
+    def _auto_clear_references(self) -> str:
+        """Legacy method - references now cleared at START of each turn via start_turn_review."""
+        # References are now automatically reviewed and cleared at the start of each turn
+        # This method is kept for backwards compatibility but does nothing
+        return ""
+
     def clear_history(self):
         self.conversation_history = []
         self.refs.clear()
@@ -1889,47 +2808,43 @@ Tool outputs (file reads, searches, etc.) are automatically stored as references
         return self.yap_manager.get_changed_yap_files()
 
     def initialize_yap_guided(self):
-        locations = self.yap_manager.get_recommended_yap_locations()
-        if not locations:
-            print_warning("No code files found")
+        recommendations = self.yap_manager.get_recommended_yap_locations()
+        if not recommendations:
+            print_warning("No code files found needing .yap files")
             return
 
-        print_info(f"Found {len(locations)} recommended YAP locations:")
-        for i, loc in enumerate(locations):
-            rel = loc.relative_to(self.yap_manager.project_root) if loc != self.yap_manager.project_root else Path(".")
-            exists = (loc / self.yap_manager.yap_filename).exists()
-            status = f"{Colors.GREEN}(exists){Colors.RESET}" if exists else f"{Colors.YELLOW}(missing){Colors.RESET}"
-            print(f"  {i+1}. {rel}/ {status}")
+        print_info(f"Found {len(recommendations)} recommended .yap files to create:")
+        for i, rec in enumerate(recommendations):
+            yap_rel = rec["yap_path"].relative_to(self.yap_manager.project_root)
+            code_rel = rec["code_path"].relative_to(self.yap_manager.project_root) if rec["code_path"] != self.yap_manager.project_root else "."
+            type_label = f"[{rec['type']}]"
+            print(f"  {i+1}. {yap_rel} → {code_rel} {Colors.DIM}{type_label}{Colors.RESET}")
         print()
 
-        for loc in locations:
-            rel = loc.relative_to(self.yap_manager.project_root) if loc != self.yap_manager.project_root else Path(".")
-            yap_path = loc / self.yap_manager.yap_filename
+        for rec in recommendations:
+            yap_path = rec["yap_path"]
+            code_path = rec["code_path"]
+            yap_rel = yap_path.relative_to(self.yap_manager.project_root)
+            code_rel = code_path.relative_to(self.yap_manager.project_root) if code_path != self.yap_manager.project_root else "."
 
-            if yap_path.exists():
-                continue
+            print_subheader(f"Create: {yap_rel}")
+            print(f"For: {code_rel}")
 
-            print_subheader(f"Create YAP for: {rel}/")
-            code_files = [f.name for f in loc.iterdir() if f.is_file() and not f.name.startswith('.')]
-            if code_files:
-                print(f"Files: {', '.join(code_files[:10])}")
-
-            response = input(f"\nCreate YAP.md? [Y/n/skip all]: ").strip().lower()
+            response = input(f"\nCreate {yap_rel}? [Y/n/skip all]: ").strip().lower()
             if response == 'skip all':
                 break
             elif response in ('n', 'no'):
                 continue
 
-            self.run(f"""Create YAP.md for: {rel}/
-Files: {', '.join(code_files)}
+            self.run(f"""Create {yap_rel} for: {code_rel}
 
-1. Read the files
+1. Read the code file(s)
 2. Ask me about intent/decisions
-3. Propose YAP structure
-4. Wait for approval""")
+3. Propose .yap structure following the spec
+4. Wait for approval before writing""")
 
             print()
-            if input("Next location? [Y/n]: ").strip().lower() in ('n', 'no'):
+            if input("Next? [Y/n]: ").strip().lower() in ('n', 'no'):
                 break
             self.clear_history()
 
@@ -1979,17 +2894,30 @@ def main():
     if yap_files:
         changes = agent.check_for_changes()
         if changes:
-            print_warning(f"{len(changes)} YAP file(s) with pending changes:")
-            for path, stored_hash, current_hash, timestamp in changes:
-                rel = path.relative_to(agent.yap_manager.project_root)
-                if stored_hash:
-                    print(f"  {Colors.YELLOW}• {rel}{Colors.RESET}")
-                    print(f"    {Colors.DIM}Implemented: {timestamp} | {stored_hash} → {current_hash}{Colors.RESET}")
-                else:
-                    print(f"  {Colors.YELLOW}• {rel} (never implemented){Colors.RESET}")
+            yap_changed = [c for c in changes if c["yap_changed"]]
+            code_changed = [c for c in changes if c["code_changed"]]
+
+            if yap_changed:
+                print_warning(f"{len(yap_changed)} .yap file(s) with pending changes:")
+                for c in yap_changed:
+                    rel = c["path"].relative_to(agent.yap_manager.project_root)
+                    if c["timestamp"]:
+                        print(f"  {Colors.YELLOW}• {rel}{Colors.RESET}")
+                        print(f"    {Colors.DIM}yap: {c['stored_yap_hash']} → {c['current_yap_hash']}{Colors.RESET}")
+                    else:
+                        print(f"  {Colors.YELLOW}• {rel} (never synced){Colors.RESET}")
+
+            if code_changed:
+                print_warning(f"{len(code_changed)} code file(s) changed without yap review:")
+                for c in code_changed:
+                    rel = c["path"].relative_to(agent.yap_manager.project_root)
+                    code_rel = c["code_path"].relative_to(agent.yap_manager.project_root) if c["code_path"] else "?"
+                    print(f"  {Colors.RED}• {rel}{Colors.RESET} (code: {code_rel})")
+                    print(f"    {Colors.DIM}code: {c['stored_code_hash']} → {c['current_code_hash']}{Colors.RESET}")
+
             print()
         else:
-            print_success(f"All {len(yap_files)} YAP file(s) up to date\n")
+            print_success(f"All {len(yap_files)} .yap file(s) up to date\n")
 
     # If a request was provided as argument, use that as the initial prompt
     if args.request:
@@ -2004,6 +2932,17 @@ def main():
                 request = initial_prompt
                 initial_prompt = None
             else:
+                # Show current mode and refs status
+                mode_color = Colors.GREEN if agent.mode == "CODE_MODE" else Colors.BLUE
+                print(f"  {mode_color}mode: {agent.mode}{Colors.RESET}")
+
+                # Show pending mode switch if any
+                if agent.pending_mode_switch:
+                    pending = agent.pending_mode_switch
+                    print(f"  {Colors.ORANGE}pending: {pending['from']} → {pending['to']}{Colors.RESET}")
+                    print(f"  {Colors.DIM}reason: {pending['reason']}{Colors.RESET}")
+                    print(f"  {Colors.BOLD}Approve mode switch? (yes/no){Colors.RESET}")
+
                 # Show refs status line if any refs are selected
                 refs_status = agent.refs.get_status_line()
                 if refs_status:
@@ -2014,14 +2953,54 @@ def main():
                 continue
             if request.lower() in ("quit", "exit"):
                 break
+
+            # Handle pending mode switch approval
+            if agent.pending_mode_switch:
+                pending = agent.pending_mode_switch
+                # Check for approval keywords
+                approval_keywords = ["yes", "y", "approved", "approve", "ok", "go", "go ahead", "sure", "do it", "proceed"]
+                rejection_keywords = ["no", "n", "reject", "denied", "cancel", "stop", "don't", "dont"]
+
+                request_lower = request.lower().strip()
+                if any(kw == request_lower or request_lower.startswith(kw + " ") or request_lower.startswith(kw + ",") for kw in approval_keywords):
+                    # Approved - execute the mode switch
+                    old_mode = agent.mode
+                    agent.mode = pending["to"]
+                    agent.pending_mode_switch = None
+                    mode_color = Colors.GREEN if agent.mode == "CODE_MODE" else Colors.BLUE
+                    print(f"{mode_color}Mode switched: {old_mode} → {agent.mode}{Colors.RESET}")
+                    print(f"User approved: {request}")
+                    # Continue with any additional message content
+                    remaining = request_lower
+                    for kw in approval_keywords:
+                        if remaining.startswith(kw):
+                            remaining = remaining[len(kw):].lstrip(" ,.-")
+                            break
+                    if not remaining:
+                        continue
+                    request = remaining
+                elif any(kw == request_lower or request_lower.startswith(kw + " ") for kw in rejection_keywords):
+                    # Rejected - cancel the mode switch
+                    agent.pending_mode_switch = None
+                    print(f"{Colors.ORANGE}Mode switch cancelled by user{Colors.RESET}")
+                    print(f"User said: {request}")
+                    continue
+                # If neither clear approval nor rejection, pass to agent to interpret
+
             if request.lower() == "clear":
                 agent.clear_history()
                 continue
             if request.lower() == "changes":
                 changes = agent.check_for_changes()
                 if changes:
-                    for path, *_ in changes:
-                        print(f"  • {path.relative_to(agent.yap_manager.project_root)}")
+                    for c in changes:
+                        rel = c["path"].relative_to(agent.yap_manager.project_root)
+                        flags = []
+                        if c["yap_changed"]:
+                            flags.append("yap changed")
+                        if c["code_changed"]:
+                            flags.append("code drifted")
+                        print(f"  • {rel} ({', '.join(flags)})")
                 else:
                     print_success("All up to date")
                 continue
