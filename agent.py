@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-ADL Agent - A conversation-based agentic coding tool.
+Yapper - A conversation-based agentic coding tool.
 
 Features:
-- ADL change detection on startup
+- YAP.md change detection on startup
 - Hash-based tracking of implementation status
-- Rate limit handling with automatic retry
 - Colored output with git-style diffs
-- Guided ADL initialization for new repos
+- Guided YAP initialization for new repos
 """
 
 import os
@@ -15,7 +14,6 @@ import sys
 import json
 import re
 import hashlib
-import time
 import difflib
 from pathlib import Path
 from typing import Optional
@@ -27,6 +25,41 @@ try:
 except ImportError:
     print("Error: anthropic package not installed. Run: pip install anthropic")
     sys.exit(1)
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    print("Error: python-dotenv package not installed. Run: pip install python-dotenv")
+    sys.exit(1)
+
+
+def ensure_api_key() -> bool:
+    """Load API key from .env file, prompting user to create one if missing."""
+    env_path = Path.cwd() / ".env"
+
+    # Try to load existing .env
+    load_dotenv(env_path)
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True
+
+    # No API key found, prompt user
+    print(f"{Colors.YELLOW}No ANTHROPIC_API_KEY found.{Colors.RESET}")
+    print(f"Get your API key from: {Colors.CYAN}https://console.anthropic.com/settings/keys{Colors.RESET}\n")
+
+    api_key = input("Enter your Anthropic API key: ").strip()
+
+    if not api_key:
+        print(f"{Colors.RED}No API key provided. Exiting.{Colors.RESET}")
+        return False
+
+    # Save to .env file
+    env_path.write_text(f"ANTHROPIC_API_KEY={api_key}\n")
+    print(f"{Colors.GREEN}API key saved to .env{Colors.RESET}\n")
+
+    # Reload environment
+    load_dotenv(env_path)
+    return True
 
 
 # =============================================================================
@@ -127,76 +160,74 @@ class AgentConfig:
     model: str = "claude-sonnet-4-20250514"
     max_tokens: int = 8192
     project_root: str = "."
-    adl_filename: str = "ADL.md"
-    retry_delay: int = 60
-    max_retries: int = 5
+    yap_filename: str = "YAP.md"
 
 
 # =============================================================================
-# ADL Hash and Tracking
+# YAP Hash and Tracking
 # =============================================================================
 
-class ADLTracker:
-    """Tracks ADL file changes via hash at end of file."""
-    
+class YapTracker:
+    """Tracks YAP.md file changes via hash at end of file."""
+
     HASH_PATTERN = re.compile(
-        r'\n---\n<!-- ADL-HASH: ([a-f0-9]+) \| implemented: (.+?) -->\s*$'
+        r'\n---\n<!-- YAP-HASH: ([a-f0-9]+) \| implemented: (.+?) -->\s*$'
     )
-    
+
     @staticmethod
     def compute_hash(content: str) -> str:
-        content = ADLTracker.HASH_PATTERN.sub('', content)
+        content = YapTracker.HASH_PATTERN.sub('', content)
         return hashlib.sha256(content.encode()).hexdigest()[:16]
-    
+
     @staticmethod
     def get_hash_info(content: str) -> tuple[Optional[str], Optional[str]]:
-        match = ADLTracker.HASH_PATTERN.search(content)
+        match = YapTracker.HASH_PATTERN.search(content)
         if match:
             return match.group(1), match.group(2)
         return None, None
-    
+
     @staticmethod
     def add_hash(content: str) -> str:
-        content = ADLTracker.HASH_PATTERN.sub('', content)
+        content = YapTracker.HASH_PATTERN.sub('', content)
         content = content.rstrip() + '\n'
-        file_hash = ADLTracker.compute_hash(content)
+        file_hash = YapTracker.compute_hash(content)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        return f"{content}\n---\n<!-- ADL-HASH: {file_hash} | implemented: {timestamp} -->\n"
-    
+        return f"{content}\n---\n<!-- YAP-HASH: {file_hash} | implemented: {timestamp} -->\n"
+
     @staticmethod
     def has_changes(content: str) -> bool:
-        stored_hash, _ = ADLTracker.get_hash_info(content)
+        stored_hash, _ = YapTracker.get_hash_info(content)
         if stored_hash is None:
             return True
-        current_hash = ADLTracker.compute_hash(content)
+        current_hash = YapTracker.compute_hash(content)
         return current_hash != stored_hash
 
 
 # =============================================================================
-# ADL File Management
+# YAP File Management
 # =============================================================================
 
-class ADLManager:
-    def __init__(self, project_root: str, adl_filename: str = "ADL.md"):
+class YapManager:
+    def __init__(self, project_root: str, yap_filename: str = "YAP.md"):
         self.project_root = Path(project_root).resolve()
-        self.adl_filename = adl_filename
-        self.tracker = ADLTracker()
+        self.yap_filename = yap_filename
+        self.tracker = YapTracker()
     
-    def find_all_adl_files(self) -> list[Path]:
-        adl_files = []
-        for path in self.project_root.rglob(self.adl_filename):
-            adl_files.append(path)
-        return sorted(adl_files, key=lambda p: len(p.parts))
-    
-    def get_adl_for_path(self, target_path: str) -> list[Path]:
+    def find_all_yap_files(self) -> list[Path]:
+        yap_files = []
+        for path in self.project_root.rglob(self.yap_filename):
+            yap_files.append(path)
+        return sorted(yap_files, key=lambda p: len(p.parts))
+
+    def get_yap_for_path(self, target_path: str) -> list[Path]:
         target = Path(target_path)
         if not target.is_absolute():
             target = self.project_root / target
         target = target.resolve()
-        
+
         current = target if target.is_dir() else target.parent
         paths_to_check = []
-        
+
         while True:
             paths_to_check.append(current)
             if current == self.project_root or current == current.parent:
@@ -206,53 +237,53 @@ class ADLManager:
             except ValueError:
                 break
             current = current.parent
-        
-        adl_chain = []
+
+        yap_chain = []
         for path in reversed(paths_to_check):
-            adl_file = path / self.adl_filename
-            if adl_file.exists():
-                adl_chain.append(adl_file)
-        
-        return adl_chain
-    
-    def read_adl(self, adl_path: Path) -> str:
-        return adl_path.read_text()
-    
-    def write_adl(self, adl_path: Path, content: str):
-        adl_path.write_text(content)
-    
-    def mark_implemented(self, adl_path: Path):
-        content = self.read_adl(adl_path)
+            yap_file = path / self.yap_filename
+            if yap_file.exists():
+                yap_chain.append(yap_file)
+
+        return yap_chain
+
+    def read_yap(self, yap_path: Path) -> str:
+        return yap_path.read_text()
+
+    def write_yap(self, yap_path: Path, content: str):
+        yap_path.write_text(content)
+
+    def mark_implemented(self, yap_path: Path):
+        content = self.read_yap(yap_path)
         updated = self.tracker.add_hash(content)
-        self.write_adl(adl_path, updated)
-    
-    def get_changed_adl_files(self) -> list[tuple[Path, str, str, str]]:
+        self.write_yap(yap_path, updated)
+
+    def get_changed_yap_files(self) -> list[tuple[Path, str, str, str]]:
         changed = []
-        for adl_file in self.find_all_adl_files():
-            content = self.read_adl(adl_file)
+        for yap_file in self.find_all_yap_files():
+            content = self.read_yap(yap_file)
             if self.tracker.has_changes(content):
                 stored_hash, timestamp = self.tracker.get_hash_info(content)
                 current_hash = self.tracker.compute_hash(content)
-                changed.append((adl_file, stored_hash, current_hash, timestamp))
+                changed.append((yap_file, stored_hash, current_hash, timestamp))
         return changed
-    
+
     def get_project_context(self) -> str:
-        adl_files = self.find_all_adl_files()
-        if not adl_files:
-            return "No ADL.md files found in project."
-        
+        yap_files = self.find_all_yap_files()
+        if not yap_files:
+            return "No YAP.md files found in project."
+
         context_parts = []
-        for adl_file in adl_files:
-            rel_path = adl_file.relative_to(self.project_root)
-            content = self.read_adl(adl_file)
+        for yap_file in yap_files:
+            rel_path = yap_file.relative_to(self.project_root)
+            content = self.read_yap(yap_file)
             context_parts.append(f"=== {rel_path} ===\n{content}")
-        
+
         return "\n\n".join(context_parts)
-    
-    def get_recommended_adl_locations(self) -> list[Path]:
+
+    def get_recommended_yap_locations(self) -> list[Path]:
         locations = [self.project_root]
         code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.java', '.cpp', '.c', '.h'}
-        
+
         for item in self.project_root.rglob('*'):
             if item.is_file() and item.suffix in code_extensions:
                 parent = item.parent
@@ -260,7 +291,7 @@ class ADLManager:
                     code_files = [f for f in parent.iterdir() if f.suffix in code_extensions]
                     if len(code_files) >= 1:
                         locations.append(parent)
-        
+
         return sorted(set(locations), key=lambda p: len(p.parts))
 
 
@@ -361,8 +392,8 @@ TOOLS = [
         }
     },
     {
-        "name": "read_adl_chain",
-        "description": "Read ADL.md files relevant to a path. ALWAYS use before working on code.",
+        "name": "read_yap_chain",
+        "description": "Read YAP.md files relevant to a path. ALWAYS use before working on code.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -372,24 +403,24 @@ TOOLS = [
         }
     },
     {
-        "name": "update_adl",
-        "description": "Update an ADL.md file after agreeing on specs.",
+        "name": "update_yap",
+        "description": "Update a YAP.md file after agreeing on specs.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to ADL.md file"},
+                "path": {"type": "string", "description": "Path to YAP.md file"},
                 "content": {"type": "string", "description": "New content (preserve Notes section)"}
             },
             "required": ["path", "content"]
         }
     },
     {
-        "name": "mark_adl_implemented",
-        "description": "Mark ADL as implemented (updates hash). Use when done.",
+        "name": "mark_yap_implemented",
+        "description": "Mark YAP as implemented (updates hash). Use when done.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path to ADL.md file"}
+                "path": {"type": "string", "description": "Path to YAP.md file"}
             },
             "required": ["path"]
         }
@@ -402,7 +433,7 @@ TOOLS = [
             "properties": {
                 "summary": {"type": "string", "description": "What was accomplished"},
                 "files_modified": {"type": "array", "items": {"type": "string"}},
-                "adl_updates": {"type": "array", "items": {"type": "string"}}
+                "yap_updates": {"type": "array", "items": {"type": "string"}}
             },
             "required": ["summary"]
         }
@@ -414,165 +445,155 @@ TOOLS = [
 # Agent
 # =============================================================================
 
-class ADLAgent:
+class YapAgent:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.client = anthropic.Anthropic()
-        self.adl_manager = ADLManager(config.project_root, config.adl_filename)
+        self.yap_manager = YapManager(config.project_root, config.yap_filename)
         self.file_manager = FileManager(config.project_root)
         self.conversation_history = []
         self.system_prompt = self._build_system_prompt()
-    
+
     def _build_system_prompt(self) -> str:
         system_prompt_path = Path(__file__).parent / "AGENT-SYSTEM-PROMPT.md"
         agent_instructions = system_prompt_path.read_text() if system_prompt_path.exists() else ""
-        
-        adl_spec_path = Path(__file__).parent / "ADL-SPEC.md"
-        adl_spec = adl_spec_path.read_text() if adl_spec_path.exists() else ""
-        
-        project_context = self.adl_manager.get_project_context()
-        
-        return f"""You are an ADL-aligned coding agent. Turn human intent into specific specs through conversation, then implement.
 
-## ADL Specification
-{adl_spec}
+        yap_spec_path = Path(__file__).parent / "YAP-SPEC.md"
+        yap_spec = yap_spec_path.read_text() if yap_spec_path.exists() else ""
+
+        project_context = self.yap_manager.get_project_context()
+
+        return f"""You are a Yapper coding agent. Turn human intent into specific specs through conversation, then implement.
+
+## YAP Specification
+{yap_spec}
 
 ## Agent Instructions
 {agent_instructions}
 
-## Current Project ADL
+## Current Project YAP
 {project_context}
 
 ## Rules
 1. CLARIFY vague intent before proposing specs
 2. PROPOSE specs with intent/why/decided before implementing
 3. WAIT for approval before coding
-4. Use mark_adl_implemented when done
+4. Use mark_yap_implemented when done
 5. Use task_complete to summarize"""
     
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         try:
             if tool_name == "read_file":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
                 content = self.file_manager.read_file(tool_input["path"])
                 return f"Contents of {tool_input['path']}:\n\n{content}"
-            
+
             elif tool_name == "write_file":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                if "content" not in tool_input:
+                    return "Error: Missing required parameter 'content'"
                 return self.file_manager.write_file(tool_input["path"], tool_input["content"])
-            
+
             elif tool_name == "list_directory":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
                 items = self.file_manager.list_directory(tool_input["path"])
                 return f"Contents of {tool_input['path']}:\n" + "\n".join(items)
             
-            elif tool_name == "read_adl_chain":
-                adl_files = self.adl_manager.get_adl_for_path(tool_input["path"])
-                if not adl_files:
-                    return f"No ADL.md files found for: {tool_input['path']}"
-                
+            elif tool_name == "read_yap_chain":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                yap_files = self.yap_manager.get_yap_for_path(tool_input["path"])
+                if not yap_files:
+                    return f"No YAP.md files found for: {tool_input['path']}"
+
                 result_parts = []
-                for adl_file in adl_files:
-                    rel_path = adl_file.relative_to(self.adl_manager.project_root)
-                    content = self.adl_manager.read_adl(adl_file)
-                    has_changes = self.adl_manager.tracker.has_changes(content)
+                for yap_file in yap_files:
+                    rel_path = yap_file.relative_to(self.yap_manager.project_root)
+                    content = self.yap_manager.read_yap(yap_file)
+                    has_changes = self.yap_manager.tracker.has_changes(content)
                     status = " (pending changes)" if has_changes else " (implemented)"
                     result_parts.append(f"=== {rel_path}{status} ===\n{content}")
                 return "\n\n".join(result_parts)
-            
-            elif tool_name == "update_adl":
-                adl_path = Path(tool_input["path"])
-                if not adl_path.is_absolute():
-                    adl_path = self.adl_manager.project_root / adl_path
-                
+
+            elif tool_name == "update_yap":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                if "content" not in tool_input:
+                    return "Error: Missing required parameter 'content'"
+                yap_path = Path(tool_input["path"])
+                if not yap_path.is_absolute():
+                    yap_path = self.yap_manager.project_root / yap_path
+
                 old_content = ""
-                if adl_path.exists():
-                    old_content = self.adl_manager.read_adl(adl_path)
-                
-                self.adl_manager.write_adl(adl_path, tool_input["content"])
-                
+                if yap_path.exists():
+                    old_content = self.yap_manager.read_yap(yap_path)
+
+                self.yap_manager.write_yap(yap_path, tool_input["content"])
+
                 if old_content:
-                    print_subheader(f"ADL Changes: {tool_input['path']}")
+                    print_subheader(f"YAP Changes: {tool_input['path']}")
                     print_diff(old_content, tool_input["content"], tool_input["path"])
                 else:
                     print_success(f"Created: {tool_input['path']}")
-                
+
                 return f"Updated {tool_input['path']}"
-            
-            elif tool_name == "mark_adl_implemented":
-                adl_path = Path(tool_input["path"])
-                if not adl_path.is_absolute():
-                    adl_path = self.adl_manager.project_root / adl_path
-                self.adl_manager.mark_implemented(adl_path)
+
+            elif tool_name == "mark_yap_implemented":
+                if "path" not in tool_input:
+                    return "Error: Missing required parameter 'path'"
+                yap_path = Path(tool_input["path"])
+                if not yap_path.is_absolute():
+                    yap_path = self.yap_manager.project_root / yap_path
+                self.yap_manager.mark_implemented(yap_path)
                 print_success(f"Marked {tool_input['path']} as implemented")
                 return f"Marked {tool_input['path']} as implemented"
-            
+
             elif tool_name == "task_complete":
                 summary = tool_input.get("summary", "Done")
                 files = tool_input.get("files_modified", [])
-                adl_updates = tool_input.get("adl_updates", [])
-                
+                yap_updates = tool_input.get("yap_updates", [])
+
                 print_header("Task Complete")
                 print(f"{summary}\n")
                 if files:
                     print(f"{Colors.BOLD}Files:{Colors.RESET}")
                     for f in files:
                         print(f"  {Colors.GREEN}• {f}{Colors.RESET}")
-                if adl_updates:
-                    print(f"\n{Colors.BOLD}ADL:{Colors.RESET}")
-                    for f in adl_updates:
+                if yap_updates:
+                    print(f"\n{Colors.BOLD}YAP:{Colors.RESET}")
+                    for f in yap_updates:
                         print(f"  {Colors.BLUE}• {f}{Colors.RESET}")
                 return "TASK_COMPLETE"
-            
+
             return f"Unknown tool: {tool_name}"
         except Exception as e:
             print_error(str(e))
             return f"Error: {e}"
-    
-    def _call_api_with_retry(self, messages: list):
-        retries = 0
-        while retries < self.config.max_retries:
-            try:
-                return self.client.messages.create(
-                    model=self.config.model,
-                    max_tokens=self.config.max_tokens,
-                    system=self.system_prompt,
-                    tools=TOOLS,
-                    messages=messages
-                )
-            except anthropic.RateLimitError:
-                retries += 1
-                if retries >= self.config.max_retries:
-                    raise
-                
-                print_warning(f"Rate limited. Waiting {self.config.retry_delay}s ({retries}/{self.config.max_retries})...")
-                
-                try:
-                    for remaining in range(self.config.retry_delay, 0, -1):
-                        print(f"\r{Colors.DIM}Resuming in {remaining}s... (Ctrl+C to cancel){Colors.RESET}", end="", flush=True)
-                        time.sleep(1)
-                    print("\r" + " " * 50 + "\r", end="")
-                except KeyboardInterrupt:
-                    print("\n")
-                    raise
+
+    def _call_api(self, messages: list):
+        return self.client.messages.create(
+            model=self.config.model,
+            max_tokens=self.config.max_tokens,
+            system=self.system_prompt,
+            tools=TOOLS,
+            messages=messages
+        )
     
     def run(self, user_request: str, continue_conversation: bool = True) -> str:
-        print_header("User Request")
-        print(f"{user_request}\n")
-        
         self.conversation_history.append({"role": "user", "content": user_request})
         messages = self.conversation_history.copy()
         
         max_iterations = 30
         for iteration in range(1, max_iterations + 1):
-            print_subheader(f"Iteration {iteration}")
-            
             try:
-                response = self._call_api_with_retry(messages)
+                response = self._call_api(messages)
             except KeyboardInterrupt:
                 print_warning("Cancelled")
                 return "Cancelled"
-            except anthropic.RateLimitError:
-                print_error("Rate limit exceeded")
-                return "Rate limit exceeded"
-            
+
             if response.stop_reason == "end_turn":
                 final_text = "".join(b.text for b in response.content if hasattr(b, "text"))
                 if continue_conversation:
@@ -580,92 +601,113 @@ class ADLAgent:
                 print_agent("Response:")
                 print(f"{final_text}\n")
                 return final_text
-            
+
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             if not tool_uses:
                 final_text = "".join(b.text for b in response.content if hasattr(b, "text"))
                 if continue_conversation:
                     self.conversation_history.append({"role": "assistant", "content": response.content})
                 return final_text
-            
+
             messages.append({"role": "assistant", "content": response.content})
-            
+
             tool_results = []
             for tool_use in tool_uses:
-                print(f"  {Colors.CYAN}Tool:{Colors.RESET} {tool_use.name}")
-                input_str = json.dumps(tool_use.input, indent=2)
-                if len(input_str) > 200:
-                    input_str = input_str[:200] + "..."
-                print(f"  {Colors.DIM}Input: {input_str}{Colors.RESET}")
-                
                 result = self._execute_tool(tool_use.name, tool_use.input)
-                result_display = result[:150] + "..." if len(result) > 150 else result
-                print(f"  {Colors.DIM}Result: {result_display}{Colors.RESET}\n")
-                
+
+                # Compact tool output
+                if result.startswith("Error:"):
+                    print(f"  {Colors.RED}✗ {tool_use.name}: {result}{Colors.RESET}")
+                else:
+                    # Show tool name with brief summary
+                    summary = self._get_tool_summary(tool_use.name, tool_use.input, result)
+                    print(f"  {Colors.DIM}→ {summary}{Colors.RESET}")
+
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
                     "content": result
                 })
-                
+
                 if result == "TASK_COMPLETE":
                     if continue_conversation:
                         self.conversation_history.append({"role": "assistant", "content": response.content})
                         self.conversation_history.append({"role": "user", "content": tool_results})
                     return "Task completed"
-            
+
             messages.append({"role": "user", "content": tool_results})
-        
+
         print_warning("Max iterations reached")
         return "Max iterations reached"
+
+    def _get_tool_summary(self, tool_name: str, tool_input: dict, result: str) -> str:
+        """Generate a concise summary of tool execution."""
+        path = tool_input.get("path", "")
+        if tool_name == "read_file":
+            lines = result.count('\n')
+            return f"read {path} ({lines} lines)"
+        elif tool_name == "write_file":
+            return f"wrote {path}"
+        elif tool_name == "list_directory":
+            items = result.count('\n')
+            return f"listed {path} ({items} items)"
+        elif tool_name == "read_yap_chain":
+            return f"read YAP for {path}"
+        elif tool_name == "update_yap":
+            return f"updated {path}"
+        elif tool_name == "mark_yap_implemented":
+            return f"marked {path} implemented"
+        elif tool_name == "task_complete":
+            return "task complete"
+        return f"{tool_name}"
     
     def clear_history(self):
         self.conversation_history = []
         print_success("History cleared")
     
     def check_for_changes(self) -> list:
-        return self.adl_manager.get_changed_adl_files()
-    
-    def initialize_adl_guided(self):
-        locations = self.adl_manager.get_recommended_adl_locations()
+        return self.yap_manager.get_changed_yap_files()
+
+    def initialize_yap_guided(self):
+        locations = self.yap_manager.get_recommended_yap_locations()
         if not locations:
             print_warning("No code files found")
             return
-        
-        print_info(f"Found {len(locations)} recommended ADL locations:")
+
+        print_info(f"Found {len(locations)} recommended YAP locations:")
         for i, loc in enumerate(locations):
-            rel = loc.relative_to(self.adl_manager.project_root) if loc != self.adl_manager.project_root else Path(".")
-            exists = (loc / self.adl_manager.adl_filename).exists()
+            rel = loc.relative_to(self.yap_manager.project_root) if loc != self.yap_manager.project_root else Path(".")
+            exists = (loc / self.yap_manager.yap_filename).exists()
             status = f"{Colors.GREEN}(exists){Colors.RESET}" if exists else f"{Colors.YELLOW}(missing){Colors.RESET}"
             print(f"  {i+1}. {rel}/ {status}")
         print()
-        
+
         for loc in locations:
-            rel = loc.relative_to(self.adl_manager.project_root) if loc != self.adl_manager.project_root else Path(".")
-            adl_path = loc / self.adl_manager.adl_filename
-            
-            if adl_path.exists():
+            rel = loc.relative_to(self.yap_manager.project_root) if loc != self.yap_manager.project_root else Path(".")
+            yap_path = loc / self.yap_manager.yap_filename
+
+            if yap_path.exists():
                 continue
-            
-            print_subheader(f"Create ADL for: {rel}/")
+
+            print_subheader(f"Create YAP for: {rel}/")
             code_files = [f.name for f in loc.iterdir() if f.is_file() and not f.name.startswith('.')]
             if code_files:
                 print(f"Files: {', '.join(code_files[:10])}")
-            
-            response = input(f"\nCreate ADL.md? [Y/n/skip all]: ").strip().lower()
+
+            response = input(f"\nCreate YAP.md? [Y/n/skip all]: ").strip().lower()
             if response == 'skip all':
                 break
             elif response in ('n', 'no'):
                 continue
-            
-            self.run(f"""Create ADL.md for: {rel}/
+
+            self.run(f"""Create YAP.md for: {rel}/
 Files: {', '.join(code_files)}
 
 1. Read the files
-2. Ask me about intent/decisions  
-3. Propose ADL structure
+2. Ask me about intent/decisions
+3. Propose YAP structure
 4. Wait for approval""")
-            
+
             print()
             if input("Next location? [Y/n]: ").strip().lower() in ('n', 'no'):
                 break
@@ -678,97 +720,101 @@ Files: {', '.join(code_files)}
 
 def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description="ADL Agent - Conversation-based coding")
+
+    parser = argparse.ArgumentParser(description="Yapper - Conversation-based coding")
     parser.add_argument("request", nargs="?", help="Task to perform")
     parser.add_argument("--project", "-p", default=".", help="Project root")
     parser.add_argument("--model", "-m", default="claude-sonnet-4-20250514")
-    parser.add_argument("--interactive", "-i", action="store_true")
-    parser.add_argument("--init", action="store_true", help="Initialize ADL")
+    parser.add_argument("--init", action="store_true", help="Initialize YAP")
     parser.add_argument("--no-color", action="store_true")
-    
+
     args = parser.parse_args()
-    
+
     if args.no_color:
         Colors.disable()
-    
+
+    if not ensure_api_key():
+        sys.exit(1)
+
     config = AgentConfig(model=args.model, project_root=args.project)
-    agent = ADLAgent(config)
-    
-    print_header("ADL Agent")
+    agent = YapAgent(config)
+
+    print_header("Yapper")
     print(f"Project: {Path(args.project).resolve()}\n")
-    
-    adl_files = agent.adl_manager.find_all_adl_files()
-    
-    if not adl_files and not args.init:
-        print_warning("No ADL files found")
-        if input("Initialize ADL? [Y/n]: ").strip().lower() not in ('n', 'no'):
-            agent.initialize_adl_guided()
-            adl_files = agent.adl_manager.find_all_adl_files()
-    
+
+    yap_files = agent.yap_manager.find_all_yap_files()
+
+    if not yap_files and not args.init:
+        print_warning("No YAP files found")
+        if input("Initialize YAP? [Y/n]: ").strip().lower() not in ('n', 'no'):
+            agent.initialize_yap_guided()
+            yap_files = agent.yap_manager.find_all_yap_files()
+
     if args.init:
-        agent.initialize_adl_guided()
+        agent.initialize_yap_guided()
         return
-    
-    if adl_files:
+
+    # Check for pending YAP changes and show status
+    initial_prompt = None
+    if yap_files:
         changes = agent.check_for_changes()
         if changes:
-            print_warning(f"{len(changes)} ADL file(s) with pending changes:")
+            print_warning(f"{len(changes)} YAP file(s) with pending changes:")
             for path, stored_hash, current_hash, timestamp in changes:
-                rel = path.relative_to(agent.adl_manager.project_root)
+                rel = path.relative_to(agent.yap_manager.project_root)
                 if stored_hash:
                     print(f"  {Colors.YELLOW}• {rel}{Colors.RESET}")
                     print(f"    {Colors.DIM}Implemented: {timestamp} | {stored_hash} → {current_hash}{Colors.RESET}")
                 else:
                     print(f"  {Colors.YELLOW}• {rel} (never implemented){Colors.RESET}")
-            
-            if input("\nReview changes? [Y/n]: ").strip().lower() not in ('n', 'no'):
-                agent.run("Review ADL files with pending changes and summarize what needs implementation.")
+            print()
         else:
-            print_success(f"All {len(adl_files)} ADL file(s) up to date")
-    
-    print()
-    
-    if args.interactive:
-        print_info("Commands: quit, clear, changes, mark <path>\n")
-        
-        while True:
-            try:
+            print_success(f"All {len(yap_files)} YAP file(s) up to date\n")
+
+    # If a request was provided as argument, use that as the initial prompt
+    if args.request:
+        initial_prompt = args.request
+
+    # Always enter interactive mode
+    print_info("Commands: quit, clear, changes, mark <path>\n")
+
+    while True:
+        try:
+            if initial_prompt:
+                request = initial_prompt
+                initial_prompt = None
+            else:
                 request = input(f"{Colors.BOLD}You:{Colors.RESET} ").strip()
-                if not request:
-                    continue
-                if request.lower() in ("quit", "exit"):
-                    break
-                if request.lower() == "clear":
-                    agent.clear_history()
-                    continue
-                if request.lower() == "changes":
-                    changes = agent.check_for_changes()
-                    if changes:
-                        for path, *_ in changes:
-                            print(f"  • {path.relative_to(agent.adl_manager.project_root)}")
-                    else:
-                        print_success("All up to date")
-                    continue
-                if request.lower().startswith("mark "):
-                    path = request[5:].strip()
-                    try:
-                        agent.adl_manager.mark_implemented(agent.adl_manager.project_root / path)
-                        print_success(f"Marked {path}")
-                    except Exception as e:
-                        print_error(str(e))
-                    continue
-                
-                agent.run(request)
-                print()
-            except KeyboardInterrupt:
-                print("\n")
+
+            if not request:
                 continue
-    
-    elif args.request:
-        agent.run(args.request)
-    else:
-        parser.print_help()
+            if request.lower() in ("quit", "exit"):
+                break
+            if request.lower() == "clear":
+                agent.clear_history()
+                continue
+            if request.lower() == "changes":
+                changes = agent.check_for_changes()
+                if changes:
+                    for path, *_ in changes:
+                        print(f"  • {path.relative_to(agent.yap_manager.project_root)}")
+                else:
+                    print_success("All up to date")
+                continue
+            if request.lower().startswith("mark "):
+                path = request[5:].strip()
+                try:
+                    agent.yap_manager.mark_implemented(agent.yap_manager.project_root / path)
+                    print_success(f"Marked {path}")
+                except Exception as e:
+                    print_error(str(e))
+                continue
+
+            agent.run(request)
+            print()
+        except KeyboardInterrupt:
+            print("\n")
+            continue
 
 
 if __name__ == "__main__":

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Snake Game</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div class="game-container">
+        <h1>3D Snake Game</h1>
+        <div class="score-container">
+            <div class="score">Score: <span id="score">0</span></div>
+            <div class="high-score">High Score: <span id="high-score">0</span></div>
+        </div>
+        <div id="gameContainer"></div>
+        <div class="controls">
+            <p><strong>Movement:</strong> Arrow keys or WASD (horizontal)</p>
+            <p><strong>Vertical:</strong> Q (up) / E (down)</p>
+            <p><strong>Camera:</strong> Mouse drag to rotate, scroll to zoom</p>
+            <p><strong>Game:</strong> Space/Escape to pause</p>
+            <button id="startBtn">Start Game</button>
+            <button id="pauseBtn">Pause</button>
+            <button id="resetBtn">Reset</button>
+        </div>
+        <div class="game-over" id="gameOver" style="display: none;">
+            <h2>Game Over!</h2>
+            <p>Final Score: <span id="finalScore">0</span></p>
+            <button onclick="resetGame()">Play Again</button>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

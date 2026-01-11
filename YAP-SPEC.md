@@ -1,10 +1,10 @@
-# Agent Description Language (ADL) Specification
+# Yapper Specification (YAP)
 
-Version: 0.4
+Version: 0.5
 
 ## Purpose
 
-ADL is a **conversation artifact** - the record of how human intent becomes specific implementation, with all reasoning preserved.
+YAP (Yapper files) is a **conversation artifact** - the record of how human intent becomes specific implementation, with all reasoning preserved.
 
 It serves three roles:
 
@@ -17,19 +17,20 @@ Core principles:
 - **Intent preserved** - every spec traces back to what the human actually wanted
 - **Reasoning visible** - technical choices are justified, not just stated
 - **Decision history** - how we got here (human, agent, conversation)
-- **No hidden changes** - agent proposes through ADL, human reviews ADL diffs
+- **No hidden changes** - agent proposes through YAP, human reviews YAP diffs
 - **Specificity required** - vague intent in, specific specs out
+- **Strict structure** - only specified sections allowed, enforced by agents
 
-The goal: **codebases where humans stay in control** even when agents do most of the coding, because the ADL captures the conversation that produced the code.
+The goal: **codebases where humans stay in control** even when agents do most of the coding, because the YAP captures the conversation that produced the code.
 
 ## How It Works
 
 ```
 Human has vague intent
         ↓
-Human yaps in Notes section
+Human yaps in Yap Here section
         ↓
-Agent asks clarifying questions (in Notes)
+Agent asks clarifying questions (in Yap Here)
         ↓
 Back-and-forth until intent is clear
         ↓
@@ -44,30 +45,30 @@ Agent implements code to match specs
 Agent verifies alignment
 ```
 
-**The human reviews ADL changes, not code changes.** If the ADL is right, the code should follow.
+**The human reviews YAP changes, not code changes.** If the YAP is right, the code should follow.
 
 ## File Structure
 
 ### Location
 
-ADL files are named `ADL.md` and scattered throughout a codebase:
+YAP files are named `YAP.md` and scattered throughout a codebase:
 
 ```
 project/
-├── ADL.md                    # Root: project overview
+├── YAP.md                    # Root: project overview
 ├── src/
-│   ├── ADL.md                # src-level concerns  
+│   ├── YAP.md                # src-level concerns  
 │   ├── auth/
-│   │   ├── ADL.md            # Auth module documentation
+│   │   ├── YAP.md            # Auth module documentation
 │   │   └── *.ts
 │   └── database/
-│       ├── ADL.md            # Database module documentation
+│       ├── YAP.md            # Database module documentation
 │       └── *.ts
 ```
 
-**Scope Rule:** An `ADL.md` describes its directory and all subdirectories, unless a subdirectory has its own `ADL.md` (which takes over).
+**Scope Rule:** A `YAP.md` describes its directory and all subdirectories, unless a subdirectory has its own `YAP.md` (which takes over).
 
-### Minimal Valid ADL.md
+### Minimal Valid YAP.md
 
 ```markdown
 # Module Name
@@ -99,15 +100,47 @@ Immediately after the title. One paragraph minimum explaining what this code doe
 Handles user authentication via OAuth and email/password. Manages sessions in Redis.
 ```
 
-### Optional Sections
+### Allowed Optional Sections
 
-All other sections are optional. Their presence indicates documentation maturity. Their absence indicates gaps.
+**Standard Module Sections:**
+- `Yap Here` - Human scratchpad (preferred name)
+- `What's Here` - Files and functionality
+- `Depends On` - Dependencies
+- `Used By` - What uses this module
+- `Key Decisions` - Architectural choices
+- `Gaps` - Missing/incomplete items
+
+**Root Project Additional Sections:**
+- `Quick Map` - Codebase overview
+- `Global Conventions` - Project-wide rules
+- `Architecture Decisions` - Major technical choices
+- `Extension Guidelines` - How to add new functionality
+- `Current State` - Documentation coverage assessment
+
+**Abstract Concept Sections:**
+- `Style / Conventions` - Cross-cutting style rules
+- `Architecture` - Architectural patterns
+
+### Section Enforcement
+
+**Agents MUST:**
+- Only create sections from the allowed list above
+- Reject/remove any non-standard sections from existing YAP files
+- Integrate content from non-standard sections into appropriate standard sections
+- Ask humans where to place content that doesn't fit standard sections
+
+**Non-standard sections found in existing files should be:**
+- Integrated into `What's Here` if describing functionality
+- Moved to `Key Decisions` if architectural choices
+- Moved to `Gaps` if listing TODOs or missing features
+- Moved to `Yap Here` if informal notes/thoughts
+- Removed if redundant with other sections
 
 ---
 
-## The Human Notes Section
+## The Human Yap Section
 
-Every ADL.md SHOULD have a "Notes" or "Human Notes" section at the top (after the title and description). This is a freeform space where humans dump thoughts, TODOs, half-formed ideas, and raw information.
+Every YAP.md SHOULD have a "Yap Here" section at the top (after the title and description). This is a freeform space where humans dump thoughts, TODOs, half-formed ideas, and raw information.
 
 ```markdown
 # Auth Module
@@ -307,7 +340,7 @@ Every significant item (features, decisions, extensions) must be marked with who
 
 ### Where NOT to Use
 
-- Notes section (that's the conversation space)
+- Yap Here section (that's the conversation space)
 - Pure facts (file exists, function takes X params)
 - Convention markers themselves (`:warn:`, `:contract:`)
 
@@ -372,7 +405,7 @@ This replaces simple markers with richer context:
 ```markdown
 - retry logic with exponential backoff
   > why: handles transient failures
-  > decided: unknown - existed before ADL
+  > decided: unknown - existed before YAP
 ```
 
 ### Short Form
@@ -390,7 +423,7 @@ But prefer full format for anything non-trivial.
 
 ## The Conversation Flow
 
-The Notes section is where intent gets refined:
+The Yap Here section is where intent gets refined:
 
 ### Step 1: Human yaps
 
@@ -464,14 +497,14 @@ Human says: "yes but try 120ms, 100 seems aggressive"
 ### Step 6: Agent finalizes in structured sections
 
 ```markdown
-## Features
+## What's Here
 
 - movement queue (max 3 inputs)
   > intent: no lost keypresses when pressing quickly
   > why: buffers rapid inputs, executes one per frame
   > decided: agent, human approved
 
-## Decisions
+## Key Decisions
 
 - 120ms game tick
   > intent: snappy but not too fast
@@ -487,7 +520,7 @@ Only after specs are in structured sections does the agent write code.
 
 ## Tone and Style
 
-ADL should read like working notes, not polished documentation.
+YAP should read like working notes, not polished documentation.
 
 **Too formal:**
 > Visual styling with modern gradient background and glassmorphism effects, providing a contemporary aesthetic
@@ -498,7 +531,7 @@ ADL should read like working notes, not polished documentation.
 **Principles:**
 - Strip marketing adjectives (modern, smooth, clean, elegant)
 - Keep it terse
-- Match the informality of the Notes section
+- Match the informality of the Yap Here section
 - Facts over flourish
 
 ---
@@ -523,9 +556,9 @@ These help document decisions that span multiple files or are conceptual.
 
 ---
 
-## Root ADL.md (Project Level)
+## Root YAP.md (Project Level)
 
-The root `ADL.md` has additional responsibilities:
+The root `YAP.md` has additional responsibilities:
 
 ```markdown
 # Project Name
@@ -586,29 +619,47 @@ Honest assessment of documentation coverage:
 
 When an agent needs to understand code:
 
-1. **Start at root** - Read project-level `ADL.md` first
-2. **Follow the path** - Read `ADL.md` files down to the relevant module
-3. **Check dependencies** - Read `ADL.md` for modules listed in "Depends On"
-4. **Then read code** - Only after understanding context from ADL
+1. **Start at root** - Read project-level `YAP.md` first
+2. **Follow the path** - Read `YAP.md` files down to the relevant module
+3. **Check dependencies** - Read `YAP.md` for modules listed in "Depends On"
+4. **Then read code** - Only after understanding context from YAP
 
 ## Agent Writing Protocol
 
 When an agent modifies code:
 
-1. **Read ADL first** - Understand existing structure and conventions
+1. **Read YAP first** - Understand existing structure and conventions
 2. **Check for conflicts** - Does the change violate any `:contract:` or `:decision:`?
 3. **Make code changes** - Implement the modification
-4. **Update ADL** - Add/modify entries for changed functionality
-5. **Preserve human notes** - Don't delete or rewrite the Notes section
+4. **Update YAP** - Add/modify entries for changed functionality
+5. **Preserve human notes** - Don't delete or rewrite the Yap Here section
 6. **Add markers** - Include `:warn:`, `:contract:` etc. where appropriate
+7. **Enforce structure** - Only use allowed sections, integrate non-standard content
+
+## Section Enforcement Protocol
+
+When agents encounter non-standard sections in YAP files:
+
+1. **Identify non-standard sections** - Compare against allowed section list
+2. **Propose integration** - Suggest where content should move
+3. **Get approval** - Ask human before making structural changes
+4. **Preserve content** - Don't delete information, just reorganize
+5. **Clean structure** - Result should only have allowed sections
+
+**Common integrations:**
+- "Features" → `What's Here`
+- "TODO" / "Future Work" → `Gaps`
+- "Design Notes" → `Key Decisions`
+- "Issues" / "Problems" → `Gaps`
+- Random subsections → `Yap Here` or appropriate standard section
 
 ## Completeness Indicators
 
-ADL files reveal their own completeness:
+YAP files reveal their own completeness:
 
 | State | Indicators |
 |-------|------------|
-| **Undocumented** | No `ADL.md` exists |
+| **Undocumented** | No `YAP.md` exists |
 | **Stub** | Only title and one-line description |
 | **Partial** | Has "What's Here" but missing dependencies/decisions |
 | **Complete** | Has all relevant sections filled out |
@@ -701,7 +752,7 @@ None - this module has no dependencies.
 
 ## Versioning
 
-ADL files can include a last-updated marker at the bottom:
+YAP files can include a last-updated marker at the bottom:
 
 ```markdown
 ---

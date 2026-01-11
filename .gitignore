@@ -1,6 +1,5 @@
 .env
 .*
 !.gitignore
-project/
 *.egg-info/
 __pycache__
