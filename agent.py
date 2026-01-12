@@ -764,42 +764,49 @@ class YapIgnore:
     def _pattern_matches(self, pattern: str, path_str: str, rel_path: Path) -> bool:
         """Check if a gitignore-style pattern matches the given path."""
         import fnmatch
-        
+
         # Handle directory patterns (ending with /)
+        # These protect the directory AND all contents within it
         if pattern.endswith('/'):
-            # Only matches directories
-            pattern = pattern[:-1]
-            if not (self.project_root / rel_path).is_dir():
-                return False
-        
+            dir_name = pattern[:-1]
+            # Check if path starts with this directory or IS this directory
+            if path_str == dir_name or path_str.startswith(dir_name + '/'):
+                return True
+            # Also check if any path component matches
+            parts = rel_path.parts
+            for i, part in enumerate(parts):
+                if fnmatch.fnmatch(part, dir_name):
+                    return True
+            return False
+
         # Handle patterns starting with /
         if pattern.startswith('/'):
             # Absolute pattern (from project root)
             pattern = pattern[1:]
             return fnmatch.fnmatch(path_str, pattern)
-        
+
         # Handle patterns with **/ (recursive directory match)
         if '**/' in pattern:
             # Convert ** to * for basic fnmatch
             simple_pattern = pattern.replace('**/', '*/')
             return fnmatch.fnmatch(path_str, simple_pattern) or \
-                   any(fnmatch.fnmatch(str(Path(*path_parts)), simple_pattern) 
-                       for i in range(len(rel_path.parts)) 
+                   any(fnmatch.fnmatch(str(Path(*path_parts)), simple_pattern)
+                       for i in range(len(rel_path.parts))
                        for path_parts in [rel_path.parts[i:]])
-        
+
         # Regular pattern - check if it matches the filename or any parent path
         if fnmatch.fnmatch(path_str, pattern):
             return True
         if fnmatch.fnmatch(rel_path.name, pattern):
             return True
-        
+
         # Check if pattern matches any part of the path
         parts = rel_path.parts
         for i in range(len(parts)):
             partial_path = '/'.join(parts[i:])
             if fnmatch.fnmatch(partial_path, pattern):
                 return True
-                
+
         return False
     
     def create_default_yapignore(self):
@@ -1483,61 +1490,6 @@ TOOLS = [
             },
             "required": ["summary"]
         }
-    },
-    # Reference management tools
-    {
-        "name": "list_refs",
-        "description": "List all stored references with their summaries. Everything becomes a reference: tool outputs, actions, decisions, conversation. Auto-reviewed each turn.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-    {
-        "name": "select_refs",
-        "description": "Select references to include in your working context. Selected refs are injected into each API call. Use for content you need to work with.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ref_ids": {"type": "array", "items": {"type": "string"}, "description": "Reference IDs to select (e.g., ['ref_1', 'ref_3'])"}
-            },
-            "required": ["ref_ids"]
-        }
-    },
-    {
-        "name": "deselect_refs",
-        "description": "Remove references from working context. Use when done with content to reduce token usage.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ref_ids": {"type": "array", "items": {"type": "string"}, "description": "Reference IDs to deselect. Use ['all'] to clear all."}
-            },
-            "required": ["ref_ids"]
-        }
-    },
-    {
-        "name": "get_ref",
-        "description": "Get full content of a specific reference without selecting it. Use for one-time access.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ref_id": {"type": "string", "description": "Reference ID to retrieve"}
-            },
-            "required": ["ref_id"]
-        }
-    },
-    {
-        "name": "switch_mode",
-        "description": "Switch between YAP_MODE and CODE_MODE. YAP_MODE: conversation, specs, proposals. CODE_MODE: implementation of approved specs only. STRICT ENTRY: CODE_MODE requires human approval, no PENDING specs, and implementation plan.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "mode": {"type": "string", "description": "Target mode: 'YAP_MODE' or 'CODE_MODE'"},
-                "reason": {"type": "string", "description": "Why switching modes. For CODE_MODE: must show human approval and implementation plan"}
-            },
-            "required": ["mode", "reason"]
-        }
     }
 ]
 
@@ -1545,377 +1497,6 @@ TOOLS = [
 # =============================================================================
 # Agent
 # =============================================================================
-
-class ReferenceStore:
-    """
-    Enhanced reference system that stores EVERYTHING except current user prompt.
-    
-    Everything becomes a reference:
-    - Tool outputs (file reads, searches, etc.)
-    - Agent actions (edits, creates, yap updates)
-    - Agent decisions (proposals, reasoning) 
-    - Human responses (approvals, clarifications)
-    - Context loads (yap content, system state)
-    
-    Workflow:
-    1. ALL interactions stored as references with summaries
-    2. At start of each turn: auto-clear with iterative review
-    3. Agent decides what context to keep based on current task
-    4. Selected references injected into API calls
-    5. Process repeats each turn
-    """
-
-    def __init__(self):
-        self._refs = {}  # ref_id -> {content, ref_type, tool_name, path, created_at, summary}
-        self._counter = 0
-        self._selected = set()  # Currently selected reference IDs
-        self._turn_summaries = []  # Summaries from previous turns
-
-    def store(self, content: str, tool_name: str, tool_input: dict, ref_type: str = "tool_output") -> str:
-        """Store content and return reference ID with summary."""
-        self._counter += 1
-        ref_id = f"ref_{self._counter}"
-
-        # Extract path for display
-        path = tool_input.get("path", tool_input.get("pattern", ""))
-
-        # Create brief summary for reference listing
-        lines = content.splitlines()
-        summary = self._create_enhanced_summary(content, tool_name, ref_type, path, len(lines))
-
-        self._refs[ref_id] = {
-            "content": content,
-            "ref_type": ref_type,
-            "tool_name": tool_name,
-            "path": path,
-            "summary": summary,
-            "lines": len(lines),
-            "chars": len(content),
-            "created_at": time.time()
-        }
-
-        return ref_id
-    
-    def store_action(self, action_description: str, context: str = "", path: str = "") -> str:
-        """Store agent action as reference."""
-        return self.store(
-            content=f"Action: {action_description}\nContext: {context}",
-            tool_name="agent_action",
-            tool_input={"path": path},
-            ref_type="agent_action"
-        )
-    
-    def store_decision(self, decision: str, reasoning: str = "", context: str = "") -> str:
-        """Store agent decision as reference."""
-        return self.store(
-            content=f"Decision: {decision}\nReasoning: {reasoning}\nContext: {context}",
-            tool_name="agent_decision", 
-            tool_input={"path": ""},
-            ref_type="agent_decision"
-        )
-    
-    def store_conversation(self, content: str, speaker: str = "human") -> str:
-        """Store human conversation as reference."""
-        return self.store(
-            content=f"{speaker.title()}: {content}",
-            tool_name="conversation",
-            tool_input={"path": ""},
-            ref_type="conversation"
-        )
-
-    def _create_enhanced_summary(self, content: str, tool_name: str, ref_type: str, path: str, line_count: int) -> str:
-        """Create enhanced summary for all reference types."""
-        if ref_type == "tool_output":
-            if tool_name == "read_file":
-                # Extract key info from file content
-                if path.endswith('.py'):
-                    class_count = content.count('\nclass ')
-                    func_count = content.count('\ndef ')
-                    return f"Python file: {class_count} classes, {func_count} functions ({line_count} lines)"
-                elif path.endswith('.yap'):
-                    if "Key Decisions" in content:
-                        return f"YAP file: decisions, contracts, specs ({line_count} lines)"
-                    return f"YAP file: project context ({line_count} lines)"
-                else:
-                    return f"File content ({line_count} lines)"
-            elif tool_name == "search_files":
-                match_count = content.count('\n') - 1 if "Found" in content else 0
-                pattern = content.split('\n')[0].split(': ')[-1] if 'Found' in content else "pattern"
-                return f"Search '{pattern}': {match_count} matches found"
-            elif tool_name == "list_functions":
-                return f"Functions in {path}: {line_count} items"
-            elif tool_name == "list_directory":
-                return f"Directory {path}: {line_count} items"
-            else:
-                return f"{tool_name} output ({line_count} lines)"
-                
-        elif ref_type == "agent_action":
-            action = content.split('\n')[0].replace('Action: ', '')
-            return f"Action: {action[:50]}{'...' if len(action) > 50 else ''}"
-            
-        elif ref_type == "agent_decision":
-            decision = content.split('\n')[0].replace('Decision: ', '')
-            return f"Decision: {decision[:50]}{'...' if len(decision) > 50 else ''}"
-            
-        elif ref_type == "conversation":
-            speaker = content.split(':')[0]
-            text = content.split(':', 1)[1].strip()[:50]
-            return f"{speaker}: {text}{'...' if len(content.split(':', 1)[1].strip()) > 50 else ''}"
-            
-        else:
-            return f"{ref_type} ({line_count} lines)"
-
-    def list_refs(self, use_colors: bool = True) -> str:
-        """List all available references with summaries."""
-        if not self._refs:
-            return "No references stored yet."
-
-        lines = ["References:"]
-        for ref_id, info in self._refs.items():
-            if ref_id in self._selected:
-                if use_colors:
-                    indicator = f"{Colors.GREEN}●{Colors.RESET}"
-                else:
-                    indicator = "●"
-            else:
-                if use_colors:
-                    indicator = f"{Colors.DIM}○{Colors.RESET}"
-                else:
-                    indicator = "○"
-            lines.append(f"  {indicator} {ref_id}: {info['path']} - {info['summary']}")
-
-        if self._selected:
-            lines.append(f"\n{Colors.DIM}Selected: {len(self._selected)} ref(s) in context{Colors.RESET}" if use_colors else f"\nSelected: {len(self._selected)} ref(s) in context")
-
-        return "\n".join(lines)
-
-    def get_status_line(self) -> str:
-        """Get a compact status line showing selected refs for display in prompt."""
-        if not self._selected:
-            return ""
-        selected_paths = []
-        for ref_id in sorted(self._selected):
-            if ref_id in self._refs:
-                path = self._refs[ref_id]["path"]
-                # Shorten path for display
-                if len(path) > 20:
-                    path = "..." + path[-17:]
-                selected_paths.append(f"{ref_id}:{path}")
-        return f"{Colors.GREEN}refs:{Colors.RESET} {', '.join(selected_paths)}"
-
-    def select(self, ref_ids: list[str]) -> str:
-        """Select references to include in context."""
-        valid = []
-        invalid = []
-        for ref_id in ref_ids:
-            if ref_id in self._refs:
-                self._selected.add(ref_id)
-                valid.append(ref_id)
-            else:
-                invalid.append(ref_id)
-
-        result = f"{Colors.ORANGE}Selected {len(valid)} reference(s){Colors.RESET}"
-        if invalid:
-            result += f". Unknown: {', '.join(invalid)}"
-        return result
-
-    def deselect(self, ref_ids: list[str]) -> str:
-        """Deselect references from context."""
-        for ref_id in ref_ids:
-            self._selected.discard(ref_id)
-        return f"{Colors.ORANGE}Deselected {len(ref_ids)} reference(s){Colors.RESET}"
-
-    def deselect_all(self) -> str:
-        """Clear all selections."""
-        count = len(self._selected)
-        self._selected.clear()
-        return f"{Colors.ORANGE}Deselected all ({count}) references{Colors.RESET}"
-
-    def get_selected_content(self) -> str:
-        """Get content of all selected references for context injection."""
-        parts = []
-        
-        # Include turn summaries from previous iterations
-        if self._turn_summaries:
-            summary_content = "\n".join(f"- {summary}" for summary in self._turn_summaries[-3:])
-            parts.append(f"=== Previous Turn Summaries ===\n{summary_content}")
-        
-        # Include current selected references
-        if self._selected:
-            for ref_id in sorted(self._selected):
-                if ref_id in self._refs:
-                    info = self._refs[ref_id]
-                    ref_type = info.get('ref_type', 'tool_output')
-                    path_display = f" ({info['path']})" if info['path'] else ""
-                    parts.append(f"=== {ref_id}: {ref_type}{path_display} ===\n{info['content']}")
-
-        return "\n\n".join(parts) if parts else ""
-
-    def get(self, ref_id: str) -> str | None:
-        """Get content of a specific reference."""
-        if ref_id in self._refs:
-            return self._refs[ref_id]["content"]
-        return None
-
-    def generate_summary(self) -> str:
-        """Generate summary of all references before clearing."""
-        if not self._refs:
-            return "No references to summarize."
-        
-        summaries = []
-        for ref_id, info in self._refs.items():
-            selected_marker = "●" if ref_id in self._selected else "○"
-            summaries.append(f"  {selected_marker} {ref_id}: {info['path']} - {info['summary']}")
-        
-        return f"References to be cleared:\n" + "\n".join(summaries)
-
-    def get_keep_selection_prompt(self) -> str:
-        """Generate prompt asking which references to keep."""
-        if not self._refs:
-            return ""
-        
-        lines = ["Which references would you like to keep for the next conversation turn?"]
-        for ref_id, info in self._refs.items():
-            selected_marker = "●" if ref_id in self._selected else "○"
-            lines.append(f"  {selected_marker} {ref_id}: {info['path']} - {info['summary']}")
-        
-        lines.append("\nEnter reference IDs to keep (space-separated), or 'none' to clear all:")
-        return "\n".join(lines)
-
-    def start_turn_review(self, current_task_context: str = "") -> str:
-        """Agent reviews all reference summaries and decides what to keep for current turn."""
-        if not self._refs:
-            return "Turn review: no references to review"
-        
-        original_count = len(self._refs)
-        
-        # Auto-generate summaries for all references
-        self._auto_summarize_all()
-        
-        # Agent decides what's relevant to current task
-        relevant_refs = self._agent_filter_relevant(current_task_context)
-        
-        # Keep essential context (always keep certain types)
-        essential_refs = self._get_essential_refs()
-        refs_to_keep = relevant_refs | essential_refs
-        
-        # Create turn summary before clearing
-        cleared_summary = self._create_turn_summary(refs_to_keep)
-        if cleared_summary:
-            self._turn_summaries.append(cleared_summary)
-            # Keep only last 5 turn summaries
-            self._turn_summaries = self._turn_summaries[-5:]
-        
-        # Clear non-essential references
-        refs_cleared = []
-        for ref_id in list(self._refs.keys()):
-            if ref_id not in refs_to_keep:
-                del self._refs[ref_id]
-                refs_cleared.append(ref_id)
-                self._selected.discard(ref_id)
-        
-        # Auto-select kept references
-        self._selected = refs_to_keep & set(self._refs.keys())
-        
-        kept_count = len(refs_to_keep & set(self._refs.keys()))
-        if kept_count > 0:
-            # Show first few kept refs to avoid clutter
-            kept_refs = sorted(refs_to_keep & set(self._refs.keys()))
-            kept_display = ', '.join(kept_refs[:3])
-            if len(kept_refs) > 3:
-                kept_display += f" +{len(kept_refs)-3} more"
-            return f"Turn review: kept {kept_count}/{original_count} refs ({kept_display})"
-        else:
-            self._counter = 0  # Reset counter if all cleared
-            return f"Turn review: cleared all {original_count} references"
-    
-    def _auto_summarize_all(self):
-        """Ensure all references have summaries."""
-        for ref_id, info in self._refs.items():
-            if 'summary' not in info or not info['summary']:
-                info['summary'] = self._create_enhanced_summary(
-                    info['content'], 
-                    info['tool_name'], 
-                    info.get('ref_type', 'tool_output'),
-                    info.get('path', ''),
-                    info.get('lines', 0)
-                )
-    
-    def _agent_filter_relevant(self, current_task_context: str) -> set:
-        """Agent logic to determine relevant references."""
-        relevant = set()
-        
-        # Extract current files/paths from context
-        current_files = set()
-        if current_task_context:
-            # Look for file patterns in context
-            import re
-            file_patterns = re.findall(r'\b\w+\.(py|yap|js|ts|json|md)\b', current_task_context.lower())
-            current_files.update(pattern.split('.')[0] for pattern in file_patterns)
-        
-        for ref_id, info in self._refs.items():
-            path = info.get('path', '')
-            ref_type = info.get('ref_type', 'tool_output')
-            
-            # Always keep recent conversation and decisions
-            if ref_type in ['conversation', 'agent_decision']:
-                relevant.add(ref_id)
-            
-            # Keep file content if mentioned in current task
-            elif ref_type == 'tool_output' and path:
-                path_base = path.split('.')[0].lower()
-                if any(cf in path_base or path_base in cf for cf in current_files):
-                    relevant.add(ref_id)
-            
-            # Keep recent actions (last 3)
-            elif ref_type == 'agent_action':
-                # Keep recent actions - get last 3 action refs
-                action_refs = [(rid, info) for rid, info in self._refs.items() 
-                              if info.get('ref_type') == 'agent_action']
-                action_refs.sort(key=lambda x: x[1].get('created_at', 0), reverse=True)
-                if ref_id in [r[0] for r in action_refs[:3]]:
-                    relevant.add(ref_id)
-        
-        return relevant
-    
-    def _get_essential_refs(self) -> set:
-        """Get references that should always be kept."""
-        essential = set()
-        
-        for ref_id, info in self._refs.items():
-            path = info.get('path', '')
-            
-            # Always keep current project.yap and recent yap files
-            if path and (path == 'project.yap' or path.endswith('.yap')):
-                essential.add(ref_id)
-                
-        return essential
-    
-    def _create_turn_summary(self, kept_refs: set) -> str:
-        """Create summary of cleared references for future turns."""
-        cleared_refs = {rid: info for rid, info in self._refs.items() if rid not in kept_refs}
-        
-        if not cleared_refs:
-            return ""
-        
-        summaries = []
-        for ref_id, info in cleared_refs.items():
-            ref_type = info.get('ref_type', 'tool_output')
-            summary = info.get('summary', 'No summary')
-            summaries.append(f"{ref_type}: {summary}")
-        
-        return f"Turn summary ({len(cleared_refs)} items): " + "; ".join(summaries[:5])
-    
-    def auto_clear_with_prompt(self, prompt_callback=None) -> str:
-        """Legacy method - now redirects to start_turn_review."""
-        return self.start_turn_review("user interaction")
-
-    def clear(self):
-        """Clear all references (e.g., when conversation is cleared)."""
-        self._refs.clear()
-        self._selected.clear()
-        self._counter = 0
-
 
 class YapAgent:
     def __init__(self, config: AgentConfig):
@@ -1930,14 +1511,6 @@ class YapAgent:
         self.total_output_tokens = 0
         self.total_cache_read_tokens = 0
         self.total_cache_creation_tokens = 0
-        # Reference-based context management
-        self.refs = ReferenceStore()
-        # Mode system - start in YAP_MODE
-        self.mode = "YAP_MODE"
-        # Tool call counter for reference cycling
-        self.tool_call_count = 0
-        self.refs_cleared_this_iteration = False
-        self.pending_mode_switch = None  # Requires user approval
 
     def _build_system_prompt(self) -> str:
         # Condensed YAP spec - key rules only
@@ -2007,67 +1580,10 @@ The workflow is iterative, not linear. Go back and forth with human:
 - Propose → discuss → refine → implement → review → adjust
 - You can implement, then return to discussion
 - Always get approval before major changes
-- When done with a phase, return to human for next steps
-
-## Mode System
-You operate in two modes that enforce the yap-first workflow:
-
-**YAP_MODE (default)**: Conversation, questions, spec proposals
-- Available tools: yap tools + shared tools (list_directory, refs)
-- Focus on understanding requirements from yap files, proposing specs, getting approval
-- Cannot search or read code files - work from yap documentation
-
-**CODE_MODE**: Implementation
-- Available tools: code tools (read_file, search_files, edit_file, write_file) + shared tools
-- Focus on implementing approved specs
-
-**Mode Switching (requires user approval):**
-When you call switch_mode, it creates a PENDING request that the user must approve.
-
-```
-Agent: [calls switch_mode with reason: "Implement approved rate limiting specs"]
-System: "Mode switch requested: YAP_MODE → CODE_MODE. Waiting for user approval..."
-Human: "yes" / "approved" / "go ahead"  (or "no" to reject)
-System: [executes mode switch]
-```
-
-The user sees the pending switch and your reason, then decides whether to approve.
-Always provide a clear reason explaining what you plan to do in the new mode.
-
-## Reference System
-Everything becomes a reference: tool outputs, agent actions, decisions, conversation.
-- Use list_refs to see available references
-- Use select_refs to add references to your working context (they'll be included in each API call)
-- Use deselect_refs to remove references when done (reduces token usage)
-- Use get_ref for one-time access without selecting
-- References persist across conversation turns until cleared"""
+- When done with a phase, return to human for next steps"""
     
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         try:
-            # Mode restrictions
-            yap_tools = {
-                "read_yap_chain", "read_yap_section", "write_yap_section", "update_yap",
-                "mark_yap_implemented", "clear_yap_here", "get_implementation_status",
-                "add_pending_task", "complete_pending_task"
-            }
-
-            code_tools = {
-                "read_file", "file_info", "search_files", "edit_file", "write_file",
-                "remove_file", "list_functions"
-            }
-
-            shared_tools = {
-                "list_refs", "select_refs", "deselect_refs", "get_ref", "task_complete",
-                "switch_mode",  # Available in both modes
-                "list_directory"  # Read-only directory listing, useful in both modes
-            }
-            
-            # Check mode restrictions
-            if self.mode == "YAP_MODE" and tool_name in code_tools and tool_name not in shared_tools:
-                return f"Error: {tool_name} not available in YAP_MODE. Use switch_mode to change to CODE_MODE first."
-            
-            if self.mode == "CODE_MODE" and tool_name in yap_tools and tool_name not in shared_tools and tool_name != "switch_mode":
-                return f"Error: {tool_name} not available in CODE_MODE. Use switch_mode to change to YAP_MODE first."
             if tool_name == "read_file":
                 if "path" not in tool_input:
                     return "Error: Missing required parameter 'path'"
@@ -2083,10 +1599,7 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 actual_end = min((end_line or total_lines), start + self.config.max_read_lines - 1)
                 range_str = f"lines {start}-{actual_end} of {total_lines}"
                 truncate_note = f" [TRUNCATED - use start_line={actual_end + 1} to continue]" if was_truncated else ""
-                result = f"{tool_input['path']} ({range_str}){truncate_note}:\n\n{content}"
-                # Store as reference
-                ref_id = self.refs.store(result, tool_name, tool_input)
-                return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
+                return f"{tool_input['path']} ({range_str}){truncate_note}:\n\n{content}"
 
             elif tool_name == "file_info":
                 if "path" not in tool_input:
@@ -2116,12 +1629,7 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                     for p in protected:
                         output_lines.append(f"  {p['file']} [protected by: {p['pattern']}]")
 
-                result = "\n".join(output_lines)
-                # Store as reference if results are substantial
-                if len(results) > 3:
-                    ref_id = self.refs.store(result, tool_name, tool_input)
-                    return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
-                return result
+                return "\n".join(output_lines)
 
             elif tool_name == "edit_file":
                 if "path" not in tool_input:
@@ -2134,20 +1642,9 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 if "new_string" not in tool_input:
                     return "Error: Missing required parameter 'new_string'"
                 
-                result = self.file_manager.edit_file(
+                return self.file_manager.edit_file(
                     tool_input["path"], tool_input["old_string"], tool_input["new_string"]
                 )
-                
-                # Store action reference
-                old_preview = tool_input["old_string"][:50] + ("..." if len(tool_input["old_string"]) > 50 else "")
-                new_preview = tool_input["new_string"][:50] + ("..." if len(tool_input["new_string"]) > 50 else "")
-                action_ref = self.refs.store_action(
-                    f"Edited {tool_input['path']}: '{old_preview}' → '{new_preview}'",
-                    context=f"Modified existing file content",
-                    path=tool_input["path"]
-                )
-                
-                return result
 
             elif tool_name == "write_file":
                 if "path" not in tool_input:
@@ -2158,18 +1655,7 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 if "content" not in tool_input:
                     return "Error: Missing required parameter 'content'"
                 
-                result = self.file_manager.write_file(tool_input["path"], tool_input["content"])
-                
-                # Store action reference
-                content_size = len(tool_input["content"])
-                line_count = tool_input["content"].count('\n') + 1
-                action_ref = self.refs.store_action(
-                    f"Created {tool_input['path']} ({content_size} chars, {line_count} lines)",
-                    context="Created new file",
-                    path=tool_input["path"]
-                )
-                
-                return result
+                return self.file_manager.write_file(tool_input["path"], tool_input["content"])
 
             elif tool_name == "list_directory":
                 if "path" not in tool_input:
@@ -2196,12 +1682,7 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                     prefix = "async " if f["is_async"] else ""
                     doc = f" - {f['docstring']}" if f["docstring"] else ""
                     lines.append(f"{f['line']:4d}: {prefix}{f['name']}{f['signature']}{doc}")
-                result = f"Functions in {tool_input['path']}:\n" + "\n".join(lines)
-                # Store as reference if many functions
-                if len(functions) > 5:
-                    ref_id = self.refs.store(result, tool_name, tool_input)
-                    return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
-                return result
+                return f"Functions in {tool_input['path']}:\n" + "\n".join(lines)
 
             elif tool_name == "read_yap_chain":
                 if "path" not in tool_input:
@@ -2219,10 +1700,7 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                     has_changes = status_info["yap_changed"] or status_info["code_changed"]
                     status = " (pending changes)" if has_changes else " (synced)"
                     result_parts.append(f"=== {rel_path}{status} ===\n{content}")
-                result = "\n\n".join(result_parts)
-                # Store as reference
-                ref_id = self.refs.store(result, tool_name, tool_input)
-                return f"{Colors.ORANGE}[Stored as {ref_id}]{Colors.RESET}\n{result}"
+                return "\n\n".join(result_parts)
 
             elif tool_name == "update_yap":
                 if "path" not in tool_input:
@@ -2285,17 +1763,7 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 if not yap_path.exists():
                     return f"Error: YAP file not found: {tool_input['path']}"
 
-                result = self.yap_manager.write_yap_section(yap_path, tool_input["section"], tool_input["content"])
-                
-                # Store action reference
-                content_preview = tool_input["content"][:100].replace('\n', ' ')
-                action_ref = self.refs.store_action(
-                    f"Updated {tool_input['section']} in {tool_input['path']}: {content_preview}{'...' if len(tool_input['content']) > 100 else ''}",
-                    context="Modified YAP section",
-                    path=tool_input["path"]
-                )
-                
-                return result
+                return self.yap_manager.write_yap_section(yap_path, tool_input["section"], tool_input["content"])
 
             elif tool_name == "clear_yap_here":
                 if "path" not in tool_input:
@@ -2392,71 +1860,6 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                         print(f"  {Colors.BLUE}• {f}{Colors.RESET}")
                 return "TASK_COMPLETE"
 
-            # Reference management tools
-            elif tool_name == "list_refs":
-                return self.refs.list_refs()
-
-            elif tool_name == "select_refs":
-                ref_ids = tool_input.get("ref_ids", [])
-                if not ref_ids:
-                    return "Error: No ref_ids provided"
-                result = self.refs.select(ref_ids)
-                # Show updated refs status
-                status = self.refs.get_status_line()
-                if status:
-                    print(f"  {status}")
-                return result
-
-            elif tool_name == "deselect_refs":
-                ref_ids = tool_input.get("ref_ids", [])
-                if not ref_ids:
-                    return "Error: No ref_ids provided"
-                if ref_ids == ["all"]:
-                    result = self.refs.deselect_all()
-                else:
-                    result = self.refs.deselect(ref_ids)
-                # Show updated refs status (or indicate none selected)
-                status = self.refs.get_status_line()
-                if status:
-                    print(f"  {status}")
-                else:
-                    print(f"  {Colors.DIM}refs: (none selected){Colors.RESET}")
-                return result
-
-            elif tool_name == "get_ref":
-                ref_id = tool_input.get("ref_id", "")
-                if not ref_id:
-                    return "Error: No ref_id provided"
-                content = self.refs.get(ref_id)
-                if content is None:
-                    return f"Error: Reference '{ref_id}' not found. Use list_refs to see available references."
-                return content
-
-            elif tool_name == "switch_mode":
-                new_mode = tool_input.get("mode", "").upper()
-                reason = tool_input.get("reason", "")
-
-                if new_mode not in ["YAP_MODE", "CODE_MODE"]:
-                    return "Error: Mode must be 'YAP_MODE' or 'CODE_MODE'"
-
-                if new_mode == self.mode:
-                    return f"Already in {new_mode}"
-
-                if not reason:
-                    return "Error: Must provide reason for mode switch"
-
-                # Store pending mode switch - requires user approval
-                self.pending_mode_switch = {
-                    "from": self.mode,
-                    "to": new_mode,
-                    "reason": reason
-                }
-
-                return (f"{Colors.ORANGE}Mode switch requested: {self.mode} → {new_mode}{Colors.RESET}\n"
-                       f"Reason: {reason}\n\n"
-                       f"{Colors.BOLD}Waiting for user approval...{Colors.RESET}\n"
-                       f"User must respond to approve or reject this mode switch.")
-
             return f"Unknown tool: {tool_name}"
         except Exception as e:
             print_error(str(e))
@@ -2493,16 +1896,10 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 current_tool_use = None
                 streamed_any_text = False
 
-                # Build system content with selected references
-                system_content = self.system_prompt
-                selected_refs = self.refs.get_selected_content()
-                if selected_refs:
-                    system_content += f"\n\n## Selected References (currently in context)\n{selected_refs}"
-
                 with self.client.messages.stream(
                     model=self.config.model,
                     max_tokens=self.config.max_tokens,
-                    system=[{"type": "text", "text": system_content, "cache_control": {"type": "ephemeral"}}],
+                    system=[{"type": "text", "text": self.system_prompt, "cache_control": {"type": "ephemeral"}}],
                     tools=TOOLS,
                     messages=messages
                 ) as stream:
@@ -2589,24 +1986,11 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                     raise
     
     def run(self, user_request: str, continue_conversation: bool = True) -> str:
-        # Store human conversation as reference (everything becomes a reference except current prompt)
-        if continue_conversation:
-            self.refs.store_conversation(user_request, "human")
-        
-        # ITERATIVE REVIEW: Agent reviews all references and decides what to keep
-        if continue_conversation and self.refs._refs:
-            review_result = self.refs.start_turn_review(user_request)
-            print(f"{Colors.DIM}{review_result}{Colors.RESET}")
-        
         self.conversation_history.append({"role": "user", "content": user_request})
         messages = self.conversation_history.copy()
 
         max_iterations = 50
-        for iteration in range(1, max_iterations + 1):
-            # Reset per-iteration state
-            self.tool_call_count = 0
-            self.refs_cleared_this_iteration = False
-            
+        for _ in range(max_iterations):
             try:
                 content, stop_reason = self._call_api_streaming(messages)
             except KeyboardInterrupt:
@@ -2617,10 +2001,6 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 final_text = "".join(b.text for b in content if hasattr(b, "text"))
                 if continue_conversation:
                     self.conversation_history.append({"role": "assistant", "content": content})
-                    # Store agent response as reference
-                    self.refs.store_conversation(final_text, "agent")
-                    # Note: References now cleared at START of next turn via start_turn_review
-                # Text already streamed to terminal
                 return final_text
 
             tool_uses = [b for b in content if getattr(b, "type", None) == "tool_use"]
@@ -2628,9 +2008,6 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 final_text = "".join(b.text for b in content if hasattr(b, "text"))
                 if continue_conversation:
                     self.conversation_history.append({"role": "assistant", "content": content})
-                    # Store agent response as reference
-                    self.refs.store_conversation(final_text, "agent")
-                    # Note: References now cleared at START of next turn via start_turn_review
                 return final_text
 
             messages.append({"role": "assistant", "content": content})
@@ -2641,22 +2018,14 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                 tool_name = tool_use.name if hasattr(tool_use, "name") else tool_use.get("name", "")
                 tool_id = tool_use.id if hasattr(tool_use, "id") else tool_use.get("id", "")
 
-                # Increment tool call counter
-                self.tool_call_count += 1
-
                 result = self._execute_tool(tool_name, tool_input)
 
                 # Compact tool output
                 if result.startswith("Error:"):
                     print(f"  {Colors.RED}✗ {tool_name}: {result}{Colors.RESET}")
                 else:
-                    # Show tool name with brief summary
                     summary = self._get_tool_summary(tool_name, tool_input, result)
                     print(f"  {Colors.DIM}→ {summary}{Colors.RESET}")
-
-                # Check if we should clear references mid-iteration
-                if self._should_clear_mid_iteration(tool_name):
-                    self._mid_iteration_clear_refs(tool_name)
 
                 tool_results.append({
                     "type": "tool_result",
@@ -2668,18 +2037,11 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
                     if continue_conversation:
                         self.conversation_history.append({"role": "assistant", "content": content})
                         self.conversation_history.append({"role": "user", "content": tool_results})
-                        # Store task completion as reference
-                        self.refs.store_action("Task completed", "TASK_COMPLETE signal received")
-                        # Note: References now cleared at START of next turn via start_turn_review
                     return "Task completed"
 
             messages.append({"role": "user", "content": tool_results})
 
         print_warning("Max iterations reached")
-        if continue_conversation:
-            # Store max iterations reached as reference
-            self.refs.store_action("Max iterations reached", f"Hit limit of {max_iterations} iterations")
-            # Note: References now cleared at START of next turn via start_turn_review
         return "Max iterations reached"
 
     def _get_tool_summary(self, tool_name: str, tool_input: dict, result: str) -> str:
@@ -2732,77 +2094,9 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
             return "task complete"
         return f"{tool_name}"
     
-    def _should_clear_mid_iteration(self, tool_name: str) -> bool:
-        """Determine if references should be cleared mid-iteration."""
-        # Clear after heavy operations
-        heavy_ops = ["read_file", "search_files", "read_yap_chain", "list_functions"]
-        if tool_name in heavy_ops:
-            return True
-        
-        # Clear every 7 tool calls
-        if self.tool_call_count > 0 and self.tool_call_count % 7 == 0:
-            return True
-        
-        return False
-
-    def _smart_retain_refs(self) -> set[str]:
-        """Get reference IDs to retain during mid-iteration clearing."""
-        if not self.refs._refs:
-            return set()
-        
-        # Sort refs by creation order (newest first)
-        sorted_refs = sorted(
-            self.refs._refs.items(), 
-            key=lambda x: int(x[0].split('_')[1]),  # Extract number from ref_X
-            reverse=True
-        )
-        
-        # Keep last 2-3 refs (most recently created)
-        refs_to_keep = set()
-        for ref_id, info in sorted_refs[:3]:
-            refs_to_keep.add(ref_id)
-        
-        # Also keep currently selected refs that are in the retention list
-        retained_selected = refs_to_keep & self.refs._selected
-        
-        return retained_selected
-
-    def _mid_iteration_clear_refs(self, tool_name: str) -> str:
-        """Clear references mid-iteration with smart retention."""
-        if not self.refs._refs or self.refs_cleared_this_iteration:
-            return ""  # Skip if already cleared this iteration
-        
-        refs_to_keep = self._smart_retain_refs()
-        
-        # Clear refs not in keep list
-        refs_cleared = []
-        for ref_id in list(self.refs._refs.keys()):
-            if ref_id not in refs_to_keep:
-                del self.refs._refs[ref_id]
-                refs_cleared.append(ref_id)
-                self.refs._selected.discard(ref_id)
-        
-        # Update selected to only include kept refs
-        self.refs._selected &= refs_to_keep
-        
-        if refs_cleared:
-            self.refs_cleared_this_iteration = True
-            reason = f"after {tool_name}" if tool_name in ["read_file", "search_files", "read_yap_chain", "list_functions"] else f"at {self.tool_call_count} calls"
-            print(f"{Colors.DIM}  → cleared {len(refs_cleared)} refs ({reason}), kept {len(refs_to_keep)}{Colors.RESET}")
-            return f"Mid-iteration clear: removed {len(refs_cleared)} refs, kept {len(refs_to_keep)}"
-        
-        return ""
-
-    def _auto_clear_references(self) -> str:
-        """Legacy method - references now cleared at START of each turn via start_turn_review."""
-        # References are now automatically reviewed and cleared at the start of each turn
-        # This method is kept for backwards compatibility but does nothing
-        return ""
-
     def clear_history(self):
         self.conversation_history = []
-        self.refs.clear()
-        print_success("History and references cleared")
+        print_success("History cleared")
     
     def check_for_changes(self) -> list:
         return self.yap_manager.get_changed_yap_files()
@@ -2813,40 +2107,21 @@ Everything becomes a reference: tool outputs, agent actions, decisions, conversa
             print_warning("No code files found needing .yap files")
             return
 
-        print_info(f"Found {len(recommendations)} recommended .yap files to create:")
-        for i, rec in enumerate(recommendations):
+        # Build a summary of what needs .yap files
+        summary_lines = []
+        for rec in recommendations:
             yap_rel = rec["yap_path"].relative_to(self.yap_manager.project_root)
             code_rel = rec["code_path"].relative_to(self.yap_manager.project_root) if rec["code_path"] != self.yap_manager.project_root else "."
-            type_label = f"[{rec['type']}]"
-            print(f"  {i+1}. {yap_rel} → {code_rel} {Colors.DIM}{type_label}{Colors.RESET}")
-        print()
+            summary_lines.append(f"- {yap_rel} for {code_rel} [{rec['type']}]")
 
-        for rec in recommendations:
-            yap_path = rec["yap_path"]
-            code_path = rec["code_path"]
-            yap_rel = yap_path.relative_to(self.yap_manager.project_root)
-            code_rel = code_path.relative_to(self.yap_manager.project_root) if code_path != self.yap_manager.project_root else "."
+        summary = "\n".join(summary_lines)
 
-            print_subheader(f"Create: {yap_rel}")
-            print(f"For: {code_rel}")
+        # Let the agent handle initialization through conversation
+        self.run(f"""Initialize YAP for this project. Here are the recommended .yap files:
 
-            response = input(f"\nCreate {yap_rel}? [Y/n/skip all]: ").strip().lower()
-            if response == 'skip all':
-                break
-            elif response in ('n', 'no'):
-                continue
+{summary}
 
-            self.run(f"""Create {yap_rel} for: {code_rel}
-
-1. Read the code file(s)
-2. Ask me about intent/decisions
-3. Propose .yap structure following the spec
-4. Wait for approval before writing""")
-
-            print()
-            if input("Next? [Y/n]: ").strip().lower() in ('n', 'no'):
-                break
-            self.clear_history()
+Start by reading the code and asking me about the project's purpose, key decisions, and any context I can provide. Then propose .yap files one at a time, waiting for my approval before creating each one.""")
 
 
 # =============================================================================
@@ -2880,10 +2155,7 @@ def main():
     yap_files = agent.yap_manager.find_all_yap_files()
 
     if not yap_files and not args.init:
-        print_warning("No YAP files found")
-        if input("Initialize YAP? [Y/n]: ").strip().lower() not in ('n', 'no'):
-            agent.initialize_yap_guided()
-            yap_files = agent.yap_manager.find_all_yap_files()
+        print_warning("No YAP files found. Use --init to initialize.\n")
 
     if args.init:
         agent.initialize_yap_guided()
@@ -2924,7 +2196,7 @@ def main():
         initial_prompt = args.request
 
     # Always enter interactive mode
-    print_info("Commands: quit, clear, changes, refs, mark <path>\n")
+    print_info("Commands: quit, clear, changes, mark <path>\n")
 
     while True:
         try:
@@ -2932,60 +2204,12 @@ def main():
                 request = initial_prompt
                 initial_prompt = None
             else:
-                # Show current mode and refs status
-                mode_color = Colors.GREEN if agent.mode == "CODE_MODE" else Colors.BLUE
-                print(f"  {mode_color}mode: {agent.mode}{Colors.RESET}")
-
-                # Show pending mode switch if any
-                if agent.pending_mode_switch:
-                    pending = agent.pending_mode_switch
-                    print(f"  {Colors.ORANGE}pending: {pending['from']} → {pending['to']}{Colors.RESET}")
-                    print(f"  {Colors.DIM}reason: {pending['reason']}{Colors.RESET}")
-                    print(f"  {Colors.BOLD}Approve mode switch? (yes/no){Colors.RESET}")
-
-                # Show refs status line if any refs are selected
-                refs_status = agent.refs.get_status_line()
-                if refs_status:
-                    print(refs_status)
                 request = input(f"{Colors.BOLD}You:{Colors.RESET} ").strip()
 
             if not request:
                 continue
             if request.lower() in ("quit", "exit"):
                 break
-
-            # Handle pending mode switch approval
-            if agent.pending_mode_switch:
-                pending = agent.pending_mode_switch
-                # Check for approval keywords
-                approval_keywords = ["yes", "y", "approved", "approve", "ok", "go", "go ahead", "sure", "do it", "proceed"]
-                rejection_keywords = ["no", "n", "reject", "denied", "cancel", "stop", "don't", "dont"]
-
-                request_lower = request.lower().strip()
-                if any(kw == request_lower or request_lower.startswith(kw + " ") or request_lower.startswith(kw + ",") for kw in approval_keywords):
-                    # Approved - execute the mode switch
-                    old_mode = agent.mode
-                    agent.mode = pending["to"]
-                    agent.pending_mode_switch = None
-                    mode_color = Colors.GREEN if agent.mode == "CODE_MODE" else Colors.BLUE
-                    print(f"{mode_color}Mode switched: {old_mode} → {agent.mode}{Colors.RESET}")
-                    print(f"User approved: {request}")
-                    # Continue with any additional message content
-                    remaining = request_lower
-                    for kw in approval_keywords:
-                        if remaining.startswith(kw):
-                            remaining = remaining[len(kw):].lstrip(" ,.-")
-                            break
-                    if not remaining:
-                        continue
-                    request = remaining
-                elif any(kw == request_lower or request_lower.startswith(kw + " ") for kw in rejection_keywords):
-                    # Rejected - cancel the mode switch
-                    agent.pending_mode_switch = None
-                    print(f"{Colors.ORANGE}Mode switch cancelled by user{Colors.RESET}")
-                    print(f"User said: {request}")
-                    continue
-                # If neither clear approval nor rejection, pass to agent to interpret
 
             if request.lower() == "clear":
                 agent.clear_history()
@@ -3003,9 +2227,6 @@ def main():
                         print(f"  • {rel} ({', '.join(flags)})")
                 else:
                     print_success("All up to date")
-                continue
-            if request.lower() == "refs":
-                print(agent.refs.list_refs())
                 continue
             if request.lower().startswith("mark "):
                 path = request[5:].strip()

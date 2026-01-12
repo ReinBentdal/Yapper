@@ -259,25 +259,6 @@ Don't leave work half-done. If you can't finish, document where you stopped.
 2. If restructuring needed, propose yap changes
 3. Can suggest creating new `.yap` files
 
-**Mode System:**
-
-Agent operates in two modes enforced by tool restrictions:
-
-- **YAP_MODE** (default): For conversation, spec proposals, understanding requirements
-  - Available: yap tools, list_directory, reference tools
-  - Cannot: read or search code files - work from yap documentation
-
-- **CODE_MODE**: For implementing approved specs
-  - Available: code tools (read_file, search_files, edit_file, write_file), reference tools
-  - Cannot: modify yap files
-
-**Mode switching requires user approval:**
-```
-Agent: [calls switch_mode with reason]
-System: "Mode switch requested: YAP_MODE → CODE_MODE. Waiting for approval..."
-Human: "yes" / "no"
-```
-
 **Tools:**
 
 *YAP Operations:*
@@ -292,16 +273,14 @@ Human: "yes" / "no"
 - `add_pending_task` - add task to .yap's Yap Here section
 - `complete_pending_task` - mark a task done
 
-*File Operations (CODE_MODE only):*
+*File Operations:*
 - `read_file` / `edit_file` / `write_file` - code files only (blocked for .yap)
 - `search_files` - search code content with regex
 - `remove_file` - delete files (blocked for .yap)
 - `list_functions` - list functions in Python/JS/TS files
 
-*Shared Tools (both modes):*
+*Shared Tools:*
 - `list_directory` - see project structure
-- `list_refs` / `select_refs` / `deselect_refs` / `get_ref` - manage context
-- `switch_mode` - request mode change (requires user approval)
 
 ## Minimal Valid `.yap`
 

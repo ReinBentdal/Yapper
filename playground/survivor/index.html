@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torch Survival Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        
+        canvas {
+            border: 2px solid #444;
+            background: #000;
+        }
+        
+        .info {
+            margin: 10px 0;
+            text-align: center;
+        }
+        
+        .controls {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #aaa;
+        }
+        
+        .game-over {
+            color: #ff4444;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .win {
+            color: #44ff44;
+            font-size: 24px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Torch Survival Game</h1>
+    <div class="info">
+        <div>Level: <span id="level">1</span> | Food Remaining: <span id="foodCount">4</span></div>
+        <div id="gameStatus"></div>
+    </div>
+    <canvas id="gameCanvas" width="500" height="500"></canvas>
+    <div class="controls">
+        Use ARROW KEYS or WASD to move. Avoid enemies (red), let them eat food (yellow) instead of you!
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const levelDisplay = document.getElementById('level');
+        const foodCountDisplay = document.getElementById('foodCount');
+        const gameStatusDisplay = document.getElementById('gameStatus');
+
+        // Game constants
+        const GRID_SIZE = 25;
+        const GRID_WIDTH = 20;
+        const GRID_HEIGHT = 20;
+        const TORCH_RADIUS = 3;
+
+        // Game state
+        let currentLevel = 1;
+        let gameOver = false;
+        let gameWon = false;
+        let player = null;
+        let enemies = [];
+        let food = [];
+
+        // Entity classes
+        class Entity {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+            }
+            
+            draw() {
+                const pixelX = this.x * GRID_SIZE;
+                const pixelY = this.y * GRID_SIZE;
+                
+                ctx.fillStyle = this.color;
+                ctx.fillRect(pixelX + 2, pixelY + 2, GRID_SIZE - 4, GRID_SIZE - 4);
+            }
+        }
+
+        class Player extends Entity {
+            constructor(x, y) {
+                super(x, y, '#4444ff');
+            }
+            
+            move(dx, dy) {
+                if (gameOver || gameWon) return false;
+                
+                const newX = this.x + dx;
+                const newY = this.y + dy;
+                
+                // Check bounds
+                if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
+                    return false;
+                }
+                
+                this.x = newX;
+                this.y = newY;
+                return true;
+            }
+        }
+
+        class Enemy extends Entity {
+            constructor(x, y) {
+                super(x, y, '#ff4444');
+            }
+            
+            move() {
+                if (gameOver || gameWon) return;
+                
+                // Find nearest food (including player)
+                let targets = [...food, player];
+                let nearestTarget = null;
+                let nearestDistance = Infinity;
+                
+                targets.forEach(target => {
+                    const distance = Math.abs(this.x - target.x) + Math.abs(this.y - target.y);
+                    
+                    // If same distance, prefer non-player food
+                    if (distance < nearestDistance || 
+                        (distance === nearestDistance && target !== player && nearestTarget === player)) {
+                        nearestDistance = distance;
+                        nearestTarget = target;
+                    }
+                });
+                
+                if (!nearestTarget) return;
+                
+                // Move one step toward target
+                const dx = nearestTarget.x - this.x;
+                const dy = nearestTarget.y - this.y;
+                
+                let moveX = 0, moveY = 0;
+                
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    moveX = dx > 0 ? 1 : -1;
+                } else if (dy !== 0) {
+                    moveY = dy > 0 ? 1 : -1;
+                } else if (dx !== 0) {
+                    moveX = dx > 0 ? 1 : -1;
+                }
+                
+                const newX = this.x + moveX;
+                const newY = this.y + moveY;
+                
+                // Check bounds
+                if (newX >= 0 && newX < GRID_WIDTH && newY >= 0 && newY < GRID_HEIGHT) {
+                    this.x = newX;
+                    this.y = newY;
+                }
+            }
+        }
+
+        class Food extends Entity {
+            constructor(x, y) {
+                super(x, y, '#ffff44');
+            }
+            
+            move() {
+                // Move randomly in one of 4 directions
+                const directions = [
+                    { dx: 0, dy: -1 }, // up
+                    { dx: 1, dy: 0 },  // right  
+                    { dx: 0, dy: 1 },  // down
+                    { dx: -1, dy: 0 }  // left
+                ];
+                
+                const direction = directions[Math.floor(Math.random() * directions.length)];
+                
+                const newX = Math.max(0, Math.min(GRID_WIDTH - 1, this.x + direction.dx));
+                const newY = Math.max(0, Math.min(GRID_HEIGHT - 1, this.y + direction.dy));
+                
+                this.x = newX;
+                this.y = newY;
+            }
+        }
+
+        // Game functions
+        function getRandomEmptyPosition() {
+            let x, y;
+            let attempts = 0;
+            
+            do {
+                x = Math.floor(Math.random() * GRID_WIDTH);
+                y = Math.floor(Math.random() * GRID_HEIGHT);
+                attempts++;
+                
+                if (attempts > 100) {
+                    console.warn('Could not find empty position');
+                    break;
+                }
+            } while (isPositionOccupied(x, y));
+            
+            return { x, y };
+        }
+
+        function isPositionOccupied(x, y) {
+            if (player && player.x === x && player.y === y) return true;
+            if (enemies.some(enemy => enemy.x === x && enemy.y === y)) return true;
+            if (food.some(f => f.x === x && f.y === y)) return true;
+            return false;
+        }
+
+        function initializeLevel() {
+            // Clear existing entities
+            enemies = [];
+            food = [];
+            
+            // Create player at center
+            player = new Player(Math.floor(GRID_WIDTH / 2), Math.floor(GRID_HEIGHT / 2));
+            
+            // Create enemies (2 for level 1, +1 per level)
+            const enemyCount = 1 + currentLevel;
+            for (let i = 0; i < enemyCount; i++) {
+                const pos = getRandomEmptyPosition();
+                enemies.push(new Enemy(pos.x, pos.y));
+            }
+            
+            // Create food (4 for level 1, +2 per level)  
+            const foodCount = 2 + (currentLevel * 2);
+            for (let i = 0; i < foodCount; i++) {
+                const pos = getRandomEmptyPosition();
+                food.push(new Food(pos.x, pos.y));
+            }
+            
+            gameOver = false;
+            gameWon = false;
+            updateUI();
+        }
+
+        function updateUI() {
+            levelDisplay.textContent = currentLevel;
+            foodCountDisplay.textContent = food.length;
+            
+            if (gameWon) {
+                gameStatusDisplay.textContent = 'You Won! All food eaten!';
+                gameStatusDisplay.className = 'win';
+            } else if (gameOver) {
+                gameStatusDisplay.textContent = 'Game Over! Enemy caught you!';
+                gameStatusDisplay.className = 'game-over';
+            } else {
+                gameStatusDisplay.textContent = '';
+                gameStatusDisplay.className = '';
+            }
+        }
+
+        function checkCollisions() {
+            // Check if enemy caught player
+            enemies.forEach(enemy => {
+                if (enemy.x === player.x && enemy.y === player.y) {
+                    gameOver = true;
+                }
+            });
+            
+            // Check if enemies ate food
+            enemies.forEach(enemy => {
+                food = food.filter(f => {
+                    if (f.x === enemy.x && f.y === enemy.y) {
+                        return false; // Remove this food
+                    }
+                    return true;
+                });
+            });
+            
+            // Check win condition
+            if (food.length === 0 && !gameOver) {
+                gameWon = true;
+            }
+        }
+
+        function getDistanceFromPlayer(x, y) {
+            return Math.sqrt(Math.pow(x - player.x, 2) + Math.pow(y - player.y, 2));
+        }
+
+        function drawGrid() {
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 1;
+            
+            for (let x = 0; x <= GRID_WIDTH; x++) {
+                ctx.beginPath();
+                ctx.moveTo(x * GRID_SIZE, 0);
+                ctx.lineTo(x * GRID_SIZE, canvas.height);
+                ctx.stroke();
+            }
+            
+            for (let y = 0; y <= GRID_HEIGHT; y++) {
+                ctx.beginPath();
+                ctx.moveTo(0, y * GRID_SIZE);
+                ctx.lineTo(canvas.width, y * GRID_SIZE);
+                ctx.stroke();
+            }
+        }
+
+        function drawFogOfWar() {
+            // Draw fog for each grid cell that's outside torch radius
+            for (let x = 0; x < GRID_WIDTH; x++) {
+                for (let y = 0; y < GRID_HEIGHT; y++) {
+                    const distance = getDistanceFromPlayer(x, y);
+                    if (distance > TORCH_RADIUS) {
+                        const pixelX = x * GRID_SIZE;
+                        const pixelY = y * GRID_SIZE;
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+                        ctx.fillRect(pixelX, pixelY, GRID_SIZE, GRID_SIZE);
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            // Clear canvas
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw grid
+            drawGrid();
+            
+            // Draw entities (only those visible)
+            enemies.forEach(enemy => {
+                const distance = getDistanceFromPlayer(enemy.x, enemy.y);
+                if (distance <= TORCH_RADIUS) {
+                    enemy.draw();
+                }
+            });
+            
+            food.forEach(f => {
+                const distance = getDistanceFromPlayer(f.x, f.y);
+                if (distance <= TORCH_RADIUS) {
+                    f.draw();
+                }
+            });
+            
+            // Always draw player
+            player.draw();
+            
+            // Apply fog of war
+            drawFogOfWar();
+        }
+
+        function moveEnemies() {
+            enemies.forEach(enemy => enemy.move());
+        }
+        
+        function moveFood() {
+            food.forEach(f => f.move());
+        }
+
+        function gameStep(dx, dy) {
+            if (gameOver || gameWon) return;
+            
+            // Move player
+            const playerMoved = player.move(dx, dy);
+            
+            if (playerMoved) {
+                // Move enemies
+                moveEnemies();
+                
+                // Move food
+                moveFood();
+                
+                // Check collisions
+                checkCollisions();
+                
+                // Update UI
+                updateUI();
+                
+                // Redraw
+                draw();
+            }
+        }
+
+        // Event listeners
+        document.addEventListener('keydown', (e) => {
+            switch(e.key) {
+                case 'ArrowUp':
+                case 'w':
+                case 'W':
+                    e.preventDefault();
+                    gameStep(0, -1);
+                    break;
+                case 'ArrowDown':
+                case 's':
+                case 'S':
+                    e.preventDefault();
+                    gameStep(0, 1);
+                    break;
+                case 'ArrowLeft':
+                case 'a':
+                case 'A':
+                    e.preventDefault();
+                    gameStep(-1, 0);
+                    break;
+                case 'ArrowRight':
+                case 'd':
+                case 'D':
+                    e.preventDefault();
+                    gameStep(1, 0);
+                    break;
+                case 'r':
+                case 'R':
+                    if (gameOver || gameWon) {
+                        e.preventDefault();
+                        initializeLevel();
+                        draw();
+                    }
+                    break;
+            }
+        });
+
+        // Initialize and start game
+        initializeLevel();
+        draw();
+        
+        // Add restart instruction when game ends
+        document.addEventListener('keydown', (e) => {
+            if ((gameOver || gameWon) && !gameStatusDisplay.textContent.includes('Press R')) {
+                gameStatusDisplay.textContent += ' Press R to restart.';
+            }
+        });
+    </script>
+</body>
+</html>

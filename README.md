@@ -1,94 +1,133 @@
 # Yapper
 
-A conversation-based alignment layer between humans and AI coding agents. Yapper turns messy human intent ("yapping") into specific, trackable specs through dialogue.
+A conversation-based alignment layer for agent-assisted codebases. Yapper enforces **specs first, then code** - turning messy human intent into specific, trackable specs through dialogue.
 
 ## The Problem
 
 When coding with AI agents:
-- Codebases get messy fast
-- Agents lack context and reinvent wheels
-- Humans lose control of their own code
-- No way to track who decided what
+- Agents jump straight to code without understanding context
+- Codebases get messy fast with no architectural record
+- Humans lose track of who decided what and why
+- No way to detect when code drifts from agreed specs
 
 ## The Solution
 
-Yapper creates a conversation artifact - not documentation, but a record of how human intent becomes code:
+Yapper uses `.yap` files as the single source of truth for architectural context:
 
-1. **Human yaps** vague thoughts in the "Yap Here" section
-2. **Agent asks** clarifying questions
-3. **Together they refine** into specific specs
-4. **Agent implements** only after approval
-5. **Everything is tracked** with `decided:` attribution
+1. **Human writes intent** in the "Yap Here" section
+2. **Agent clarifies** through questions
+3. **Together they agree** on specific specs
+4. **Human approves** before implementation
+5. **Agent implements** to match specs
+6. **Hash tracking** detects when code drifts from specs
 
 ## Quick Start
 
 ```bash
-pip install anthropic
+pip install anthropic python-dotenv
 export ANTHROPIC_API_KEY=your-key
 
 # Interactive mode
-python agent.py -i --project ./your-project
+python agent.py --project ./your-project
 
 # Single request
 python agent.py "add user login" --project ./your-project
 
-# Initialize Yapper for a new project
+# Initialize YAP for a new project
 python agent.py --init --project ./your-project
 ```
 
 ## How It Works
 
-Every spec has context:
+Every spec has context and attribution:
 
 ```markdown
-- movement queue (max 3 inputs)
-  > intent: no lost keypresses when pressing quickly
-  > why: buffers rapid inputs, executes one per frame
-  > decided: agent, human approved
+- Rate limiting via token bucket (decided: agent, human approved)
+  > intent: prevent abuse without blocking legitimate users
+  > why: allows burst traffic while enforcing average rate
 ```
 
-The `decided:` field tracks attribution:
-- `human` - human specified this
+Attribution values:
+- `human` - human specified directly
 - `agent, human approved` - agent proposed, human agreed
-- `conversation` - emerged from back-and-forth
-- `agent (default)` - technical default
-- `unknown` - legacy code
-
-## Features
-
-- **Change detection** - Shows which ADL files have pending changes on startup
-- **Hash tracking** - Each ADL file has a hash to detect modifications
-- **Rate limit handling** - Pauses and retries instead of crashing
-- **Colored diffs** - Git-style +/- for all changes
-- **Guided init** - Conversational setup for new projects
+- `conversation` - emerged from back-and-forth discussion
+- `agent (default)` - technical default, low importance
 
 ## File Structure
 
 ```
 your-project/
-├── ADL.md              # Root: project overview
+├── project.yap         # Project-level context
+├── agent.yap           # Specs for agent.py
+├── .yapignore          # Protect sensitive files
 ├── src/
-│   ├── ADL.md          # src-level specs
-│   └── auth/
-│       └── ADL.md      # Auth module specs
+│   ├── auth.yap        # Specs for auth.py or auth/
+│   └── utils.yap       # Specs for utils.py
 ```
 
-## Commands
+Each `.yap` file maps to a code file or directory with the same name.
+
+## Features
+
+- **Change detection** - Shows which .yap files have pending changes on startup
+- **Hash tracking** - Detects when code changes without yap review
+- **Rate limit handling** - Pauses with countdown instead of crashing
+- **Colored output** - Git-style diffs for all changes
+- **Yapignore** - Protect sensitive files from agent access
+
+## CLI Commands
 
 In interactive mode:
 - `quit` - exit
 - `clear` - reset conversation
-- `changes` - show pending ADL changes
-- `mark <path>` - mark ADL as implemented
+- `changes` - show pending yap/code changes
+- `mark <path>` - mark .yap as implemented
 
-## The Name
+## .yapignore
 
-"Yapper" - because humans yap their messy thoughts and the agent makes sense of them. The "Yap Here" section is where stream-of-consciousness goes, and the agent structures it into specs.
+Protect sensitive files from agent access:
+
+```gitignore
+# Environment files
+.env*
+
+# Cryptographic keys
+*.key
+*.pem
+
+# Cache directories
+__pycache__/
+node_modules/
+```
+
+## YAP File Structure
+
+```markdown
+# Module Name
+
+Brief description of what this does.
+
+## Yap Here
+<!-- Working space for conversation and implementation state -->
+
+## What This Does
+Architectural purpose - what capability this provides.
+
+## Key Decisions
+Important choices with attribution.
+
+## Contracts
+What must be true. Specific and verifiable.
+
+## Depends On / Used By
+Relationships to other modules.
+```
 
 ## Documentation
 
-- `ADL.md` - This project's own spec (meta!)
-- `ADL-SPEC.md` - The Yapper format specification
+- `project.yap` - Project-level architectural context
+- `agent.yap` - Architectural context for the agent implementation
+- `YAP-SPEC.md` - The YAP format specification
 - `AGENT-SYSTEM-PROMPT.md` - Agent behavioral instructions
 
 ## License
